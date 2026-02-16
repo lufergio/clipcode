@@ -17,6 +17,19 @@ function buildPairDeepLink(pairCode: string): string {
   return `${scheme}://pair?code=${encodeURIComponent(pairCode)}`;
 }
 
+function isAndroidDevice(): boolean {
+  if (typeof navigator === "undefined") return false;
+  return /android/i.test(navigator.userAgent);
+}
+
+function buildAndroidIntentUrl(pairCode: string, fallbackUrl: string): string {
+  const scheme = process.env.NEXT_PUBLIC_APP_SCHEME || "clipcode";
+  const packageName = process.env.NEXT_PUBLIC_ANDROID_APP_PACKAGE;
+  const fallback = encodeURIComponent(fallbackUrl);
+  const packagePart = packageName ? `;package=${packageName}` : "";
+  return `intent://pair?code=${encodeURIComponent(pairCode)}#Intent;scheme=${scheme}${packagePart};S.browser_fallback_url=${fallback};end`;
+}
+
 export default function OpenPairClient() {
   const params = useSearchParams();
   const pairCode = normalizePairCode(params.get("pair"));
@@ -30,6 +43,18 @@ export default function OpenPairClient() {
     if (!pairCode) return "";
     return buildPairDeepLink(pairCode);
   }, [pairCode]);
+
+  const androidIntentUrl = useMemo(() => {
+    if (!pairCode) return "";
+    const absoluteFallback =
+      typeof window === "undefined" ? fallbackUrl : `${window.location.origin}${fallbackUrl}`;
+    return buildAndroidIntentUrl(pairCode, absoluteFallback);
+  }, [fallbackUrl, pairCode]);
+
+  const preferredOpenUrl = useMemo(() => {
+    if (!pairCode) return "";
+    return isAndroidDevice() ? androidIntentUrl : deepLinkUrl;
+  }, [androidIntentUrl, deepLinkUrl, pairCode]);
 
   useEffect(() => {
     if (!pairCode) {
@@ -49,13 +74,13 @@ export default function OpenPairClient() {
       }
     }, 1400);
 
-    window.location.href = deepLinkUrl;
+    window.location.href = preferredOpenUrl;
 
     return () => {
       window.clearTimeout(timer);
       document.removeEventListener("visibilitychange", onVisibilityChange);
     };
-  }, [deepLinkUrl, fallbackUrl, pairCode]);
+  }, [fallbackUrl, pairCode, preferredOpenUrl]);
 
   return (
     <main className="min-h-screen bg-neutral-950 px-4 py-10 text-neutral-50">
@@ -66,7 +91,7 @@ export default function OpenPairClient() {
         </p>
         <div className="mt-4 flex flex-wrap gap-2">
           <a
-            href={deepLinkUrl || "#"}
+            href={preferredOpenUrl || "#"}
             className="rounded-xl bg-neutral-50 px-4 py-2 text-sm font-semibold text-neutral-950"
           >
             Abrir app
