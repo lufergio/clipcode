@@ -60,6 +60,12 @@ type StoredClipPayload = {
   reads: number;
 };
 
+type SenderPairPayload = {
+  receiverDeviceId: string;
+  receiverDeviceLabel?: string;
+  senderDeviceLabel?: string;
+};
+
 function isHttpUrl(value: string): boolean {
   try {
     const url = new URL(value);
@@ -170,9 +176,27 @@ export async function POST(req: Request) {
 
     // Si el emisor esta emparejado, publica ultimo item en la bandeja del receptor.
     if (senderDeviceId) {
-      const receiverDeviceId = await redis.get<string>(
+      const rawSenderPairPayload = await redis.get<string | SenderPairPayload>(
         `clipcode:pair:sender:${senderDeviceId}`
       );
+
+      let receiverDeviceId = "";
+      let senderDeviceLabel = "";
+      if (typeof rawSenderPairPayload === "string") {
+        try {
+          const parsed = JSON.parse(rawSenderPairPayload) as SenderPairPayload;
+          receiverDeviceId = normalizeDeviceId(parsed?.receiverDeviceId);
+          senderDeviceLabel = String(parsed?.senderDeviceLabel ?? "").trim().slice(0, 40);
+        } catch {
+          // Compatibilidad con formato legado (string = receiverDeviceId)
+          receiverDeviceId = normalizeDeviceId(rawSenderPairPayload);
+        }
+      } else {
+        receiverDeviceId = normalizeDeviceId(rawSenderPairPayload?.receiverDeviceId);
+        senderDeviceLabel = String(rawSenderPairPayload?.senderDeviceLabel ?? "")
+          .trim()
+          .slice(0, 40);
+      }
 
       if (receiverDeviceId) {
         await redis.set(
@@ -181,6 +205,7 @@ export async function POST(req: Request) {
             code,
             links,
             text: text || undefined,
+            senderDeviceLabel: senderDeviceLabel || undefined,
             createdAt: Date.now(),
           }),
           { ex: ttlSeconds }

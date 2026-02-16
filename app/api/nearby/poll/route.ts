@@ -5,6 +5,7 @@ type NearbyPayload = {
   code?: string;
   links?: string[];
   text?: string;
+  senderDeviceLabel?: string;
   createdAt?: number;
 };
 
@@ -58,6 +59,9 @@ export async function GET(req: Request) {
       : [];
     const text = String(payload.text ?? "").trim();
     const code = String(payload.code ?? "").trim().toUpperCase();
+    const senderDeviceLabel = String(payload.senderDeviceLabel ?? "")
+      .trim()
+      .slice(0, 40);
 
     if (!links.length && !text) {
       await redis.del(key);
@@ -73,6 +77,7 @@ export async function GET(req: Request) {
         code: code || undefined,
         links,
         text: text || undefined,
+        senderDeviceLabel: senderDeviceLabel || undefined,
       },
     });
   } catch (error: unknown) {

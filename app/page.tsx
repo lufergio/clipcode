@@ -13,13 +13,19 @@ type SendState =
 type ReceiveState =
   | { status: "idle" }
   | { status: "loading" }
-  | { status: "success"; code: string; links: string[]; text?: string }
+  | {
+      status: "success";
+      code: string;
+      links: string[];
+      text?: string;
+      sourceDeviceLabel?: string;
+    }
   | { status: "error"; message: string };
 
 type PairState =
   | { status: "idle" }
   | { status: "linking" }
-  | { status: "linked"; receiverDeviceId: string }
+  | { status: "linked"; receiverDeviceId: string; receiverDeviceLabel?: string }
   | { status: "error"; message: string };
 
 type NearbyState =
@@ -39,7 +45,13 @@ const TTL_OPTIONS = [
 const MAX_LINKS = 10;
 const MIN_VISIBLE_LINK_INPUTS = 3;
 const DEVICE_ID_STORAGE_KEY = "clipcode:device-id";
+const DEVICE_LABEL_STORAGE_KEY = "clipcode:device-label";
 const PAIRED_RECEIVER_STORAGE_KEY = "clipcode:paired-receiver";
+
+type PairedReceiverInfo = {
+  receiverDeviceId: string;
+  receiverDeviceLabel?: string;
+};
 
 function isHttpUrl(value: string): boolean {
   try {
@@ -64,11 +76,20 @@ function normalizeDeviceId(value: unknown): string {
   return normalized;
 }
 
+function normalizeDeviceLabel(value: unknown): string {
+  return String(value ?? "").trim().slice(0, 40);
+}
+
 function createDeviceId(): string {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
     return crypto.randomUUID().replace(/-/g, "");
   }
   return `dev${Math.random().toString(36).slice(2, 14)}`;
+}
+
+function fallbackDeviceLabel(deviceId: string): string {
+  const shortId = deviceId.slice(-4).toUpperCase();
+  return shortId ? `Dispositivo ${shortId}` : "Mi dispositivo";
 }
 
 function shortenLink(value: string): string {
@@ -118,6 +139,7 @@ export default function HomePage() {
   const [pairState, setPairState] = useState<PairState>({ status: "idle" });
   const [nearbyState, setNearbyState] = useState<NearbyState>({ status: "idle" });
   const [deviceId, setDeviceId] = useState("");
+  const [deviceLabel, setDeviceLabel] = useState("");
 
   const [toast, setToast] = useState<string | null>(null);
   const toastTimerRef = useRef<number | null>(null);
@@ -144,6 +166,41 @@ export default function HomePage() {
     if (nearbyPollTimerRef.current) {
       window.clearTimeout(nearbyPollTimerRef.current);
       nearbyPollTimerRef.current = null;
+    }
+  }
+
+  function readPairedReceiverInfo(): PairedReceiverInfo | null {
+    if (typeof window === "undefined") return null;
+    const raw = localStorage.getItem(PAIRED_RECEIVER_STORAGE_KEY);
+    if (!raw) return null;
+
+    try {
+      const parsed = JSON.parse(raw) as PairedReceiverInfo;
+      const receiverDeviceId = normalizeDeviceId(parsed?.receiverDeviceId);
+      if (!receiverDeviceId) return null;
+      const receiverDeviceLabel = normalizeDeviceLabel(parsed?.receiverDeviceLabel);
+      return {
+        receiverDeviceId,
+        receiverDeviceLabel: receiverDeviceLabel || undefined,
+      };
+    } catch {
+      // Compatibilidad con formato viejo (string plano).
+      const receiverDeviceId = normalizeDeviceId(raw);
+      if (!receiverDeviceId) return null;
+      return { receiverDeviceId };
+    }
+  }
+
+  function savePairedReceiverInfo(info: PairedReceiverInfo) {
+    localStorage.setItem(PAIRED_RECEIVER_STORAGE_KEY, JSON.stringify(info));
+  }
+
+  function persistDeviceLabel(nextLabel: string) {
+    const normalized = normalizeDeviceLabel(nextLabel);
+    const resolved = normalized || fallbackDeviceLabel(deviceId);
+    setDeviceLabel(resolved);
+    if (typeof window !== "undefined") {
+      localStorage.setItem(DEVICE_LABEL_STORAGE_KEY, resolved);
     }
   }
 
@@ -179,11 +236,20 @@ export default function HomePage() {
     localStorage.setItem(DEVICE_ID_STORAGE_KEY, resolvedDeviceId);
     setDeviceId(resolvedDeviceId);
 
-    const pairedReceiver = normalizeDeviceId(
-      localStorage.getItem(PAIRED_RECEIVER_STORAGE_KEY)
+    const storedLabel = normalizeDeviceLabel(
+      localStorage.getItem(DEVICE_LABEL_STORAGE_KEY)
     );
+    const resolvedLabel = storedLabel || fallbackDeviceLabel(resolvedDeviceId);
+    localStorage.setItem(DEVICE_LABEL_STORAGE_KEY, resolvedLabel);
+    setDeviceLabel(resolvedLabel);
+
+    const pairedReceiver = readPairedReceiverInfo();
     if (pairedReceiver) {
-      setPairState({ status: "linked", receiverDeviceId: pairedReceiver });
+      setPairState({
+        status: "linked",
+        receiverDeviceId: pairedReceiver.receiverDeviceId,
+        receiverDeviceLabel: pairedReceiver.receiverDeviceLabel,
+      });
     }
   }, []);
 
@@ -254,6 +320,7 @@ export default function HomePage() {
         code: String(data?.code ?? code),
         links,
         text: receivedText || undefined,
+        sourceDeviceLabel: undefined,
       });
       setNearbyState({ status: "idle" });
     } catch {
@@ -327,6 +394,7 @@ export default function HomePage() {
           text: textValue || undefined,
           ttlSeconds,
           senderDeviceId: deviceId || undefined,
+          senderDeviceLabel: deviceLabel || undefined,
         }),
       });
 
@@ -384,7 +452,10 @@ export default function HomePage() {
       const res = await fetch("/api/pair/create", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ receiverDeviceId: deviceId }),
+        body: JSON.stringify({
+          receiverDeviceId: deviceId,
+          receiverDeviceLabel: deviceLabel || undefined,
+        }),
       });
       const data = (await res.json()) as {
         pairCode?: string;
@@ -435,12 +506,14 @@ export default function HomePage() {
         body: JSON.stringify({
           pairCode: normalizedPairCode,
           senderDeviceId: deviceId,
+          senderDeviceLabel: deviceLabel || undefined,
         }),
       });
 
       const data = (await res.json()) as {
         linked?: boolean;
         receiverDeviceId?: string;
+        receiverDeviceLabel?: string;
         error?: string;
       };
 
@@ -452,10 +525,15 @@ export default function HomePage() {
         return;
       }
 
-      localStorage.setItem(PAIRED_RECEIVER_STORAGE_KEY, data.receiverDeviceId);
+      const linkedInfo: PairedReceiverInfo = {
+        receiverDeviceId: data.receiverDeviceId,
+        receiverDeviceLabel: normalizeDeviceLabel(data.receiverDeviceLabel) || undefined,
+      };
+      savePairedReceiverInfo(linkedInfo);
       setPairState({
         status: "linked",
-        receiverDeviceId: data.receiverDeviceId,
+        receiverDeviceId: linkedInfo.receiverDeviceId,
+        receiverDeviceLabel: linkedInfo.receiverDeviceLabel,
       });
       showToast("Dispositivo vinculado");
     } catch {
@@ -466,9 +544,15 @@ export default function HomePage() {
     }
   }
 
+  function handleUnlinkPair() {
+    localStorage.removeItem(PAIRED_RECEIVER_STORAGE_KEY);
+    setPairState({ status: "idle" });
+    showToast("Vinculacion eliminada");
+  }
+
   async function pollNearbyOnce(): Promise<{
     found: boolean;
-    item?: { code?: string; links: string[]; text?: string };
+    item?: { code?: string; links: string[]; text?: string; senderDeviceLabel?: string };
   }> {
     const res = await fetch(
       `/api/nearby/poll?receiverDeviceId=${encodeURIComponent(deviceId)}`
@@ -476,7 +560,7 @@ export default function HomePage() {
 
     const data = (await res.json()) as {
       found?: boolean;
-      item?: { code?: string; links?: string[]; text?: string };
+      item?: { code?: string; links?: string[]; text?: string; senderDeviceLabel?: string };
       error?: string;
     };
 
@@ -493,6 +577,7 @@ export default function HomePage() {
       : [];
     const textValue = String(data.item.text ?? "").trim();
     const codeValue = String(data.item.code ?? "").trim().toUpperCase();
+    const senderDeviceLabel = normalizeDeviceLabel(data.item.senderDeviceLabel);
 
     return {
       found: true,
@@ -500,6 +585,7 @@ export default function HomePage() {
         code: codeValue || undefined,
         links,
         text: textValue || undefined,
+        senderDeviceLabel: senderDeviceLabel || undefined,
       },
     };
   }
@@ -530,6 +616,7 @@ export default function HomePage() {
             code: result.item.code ?? "PAIR",
             links: result.item.links,
             text: result.item.text,
+            sourceDeviceLabel: result.item.senderDeviceLabel,
           });
           setNearbyState({ status: "idle" });
           showToast("Contenido encontrado");
@@ -632,6 +719,18 @@ export default function HomePage() {
           <p className="mt-2 text-sm text-neutral-300">
             Pasa links y texto entre dispositivos con un codigo. Sin cuenta.
           </p>
+          <div className="mt-4 rounded-xl bg-neutral-900 p-3 ring-1 ring-neutral-800">
+            <label className="mb-2 block text-xs font-medium text-neutral-300">
+              Nombre de este dispositivo
+            </label>
+            <input
+              value={deviceLabel}
+              onChange={(event) => setDeviceLabel(normalizeDeviceLabel(event.target.value))}
+              onBlur={() => persistDeviceLabel(deviceLabel)}
+              placeholder="Ej: TV Sala, iPhone Luis"
+              className="w-full rounded-lg bg-neutral-950 px-3 py-2 text-sm outline-none ring-1 ring-neutral-800 focus:ring-2 focus:ring-neutral-400"
+            />
+          </div>
         </header>
 
         <div className="mb-6 flex rounded-xl bg-neutral-900 p-1">
@@ -767,7 +866,19 @@ export default function HomePage() {
 
             {pairState.status === "linked" && (
               <div className="mt-3 rounded-xl bg-emerald-950/30 p-3 text-sm text-emerald-200 ring-1 ring-emerald-900">
-                Vinculado. Buscar cerca disponible para este par.
+                <div>
+                  Vinculado con{" "}
+                  <span className="font-semibold">
+                    {pairState.receiverDeviceLabel || "dispositivo remoto"}
+                  </span>
+                  . Buscar cerca disponible para este par.
+                </div>
+                <button
+                  onClick={handleUnlinkPair}
+                  className="mt-2 rounded-lg bg-emerald-900/70 px-3 py-1 text-xs font-medium text-emerald-100 hover:bg-emerald-900"
+                >
+                  Desvincular
+                </button>
               </div>
             )}
             {pairState.status === "error" && (
@@ -867,6 +978,9 @@ export default function HomePage() {
                   <div className="text-sm text-neutral-300">Pair code</div>
                   <div className="text-4xl font-bold tracking-widest">{pairingCode.code}</div>
                   <div className="text-xs text-neutral-400">
+                    Dispositivo: {deviceLabel || "Mi dispositivo"}
+                  </div>
+                  <div className="text-xs text-neutral-400">
                     Expira en {Math.ceil(pairingCode.expiresIn / 60)} min
                   </div>
                   <div className="rounded-2xl bg-white p-3">
@@ -936,6 +1050,14 @@ export default function HomePage() {
                 <div className="mb-3 text-sm text-neutral-300">
                   Codigo: <span className="font-semibold text-neutral-50">{receiveState.code}</span>
                 </div>
+                {receiveState.sourceDeviceLabel && (
+                  <div className="mb-3 text-sm text-neutral-300">
+                    Enviado desde:{" "}
+                    <span className="font-semibold text-neutral-50">
+                      {receiveState.sourceDeviceLabel}
+                    </span>
+                  </div>
+                )}
 
                 {!!receiveState.links.length && (
                   <div className="space-y-3">

@@ -6,6 +6,12 @@ const PAIR_CODE_TTL_SECONDS = 600; // 10 min
 
 type PairCreateBody = {
   receiverDeviceId?: unknown;
+  receiverDeviceLabel?: unknown;
+};
+
+type PairCodePayload = {
+  receiverDeviceId: string;
+  receiverDeviceLabel?: string;
 };
 
 function normalizeDeviceId(value: unknown): string {
@@ -15,14 +21,19 @@ function normalizeDeviceId(value: unknown): string {
   return normalized;
 }
 
+function normalizeDeviceLabel(value: unknown): string {
+  return String(value ?? "").trim().slice(0, 40);
+}
+
 /**
  * POST /api/pair/create
- * Body: { receiverDeviceId: string }
+ * Body: { receiverDeviceId: string; receiverDeviceLabel?: string }
  */
 export async function POST(req: Request) {
   try {
     const body = (await req.json()) as PairCreateBody;
     const receiverDeviceId = normalizeDeviceId(body?.receiverDeviceId);
+    const receiverDeviceLabel = normalizeDeviceLabel(body?.receiverDeviceLabel);
 
     if (!receiverDeviceId) {
       return NextResponse.json(
@@ -48,13 +59,20 @@ export async function POST(req: Request) {
       );
     }
 
-    await redis.set(`clipcode:pair:code:${pairCode}`, receiverDeviceId, {
-      ex: PAIR_CODE_TTL_SECONDS,
-    });
+    const payload: PairCodePayload = {
+      receiverDeviceId,
+      receiverDeviceLabel: receiverDeviceLabel || undefined,
+    };
+    await redis.set(
+      `clipcode:pair:code:${pairCode}`,
+      JSON.stringify(payload),
+      { ex: PAIR_CODE_TTL_SECONDS }
+    );
 
     return NextResponse.json({
       pairCode,
       expiresIn: PAIR_CODE_TTL_SECONDS,
+      receiverDeviceLabel: receiverDeviceLabel || undefined,
     });
   } catch (error: unknown) {
     console.error("POST /api/pair/create error:", error);
