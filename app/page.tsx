@@ -30,6 +30,7 @@ type ReceiveState =
 
 type PairState =
   | { status: "idle" }
+  | { status: "waiting" }
   | { status: "linking" }
   | { status: "linked"; receiverDeviceId: string; receiverDeviceLabel?: string }
   | { status: "error"; message: string };
@@ -258,6 +259,7 @@ export default function HomePage() {
   const [toast, setToast] = useState<string | null>(null);
   const toastTimerRef = useRef<number | null>(null);
   const nearbyPollTimerRef = useRef<number | null>(null);
+  const pairStatusPollTimerRef = useRef<number | null>(null);
   const didAutoProcessRef = useRef(false);
 
   const sendTextareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -280,6 +282,13 @@ export default function HomePage() {
     if (nearbyPollTimerRef.current) {
       window.clearTimeout(nearbyPollTimerRef.current);
       nearbyPollTimerRef.current = null;
+    }
+  }
+
+  function clearPairStatusPollTimer() {
+    if (pairStatusPollTimerRef.current) {
+      window.clearTimeout(pairStatusPollTimerRef.current);
+      pairStatusPollTimerRef.current = null;
     }
   }
 
@@ -371,6 +380,16 @@ export default function HomePage() {
         status: "linked",
         receiverDeviceId: pairedReceiver.receiverDeviceId,
         receiverDeviceLabel: pairedReceiver.receiverDeviceLabel,
+      });
+    } else {
+      void fetchPairStatusOnce(resolvedDeviceId).then((linkedInfo) => {
+        if (!linkedInfo) return;
+        savePairedReceiverInfo(linkedInfo);
+        setPairState({
+          status: "linked",
+          receiverDeviceId: linkedInfo.receiverDeviceId,
+          receiverDeviceLabel: linkedInfo.receiverDeviceLabel,
+        });
       });
     }
   }, []);
@@ -665,6 +684,8 @@ export default function HomePage() {
         expiresIn: Number(data.expiresIn ?? 600),
         createdAt: Date.now(),
       });
+      setPairState({ status: "waiting" });
+      startPairStatusPolling(Number(data.expiresIn ?? 600));
       showToast("Código de sincronización creado");
     } catch (error: unknown) {
       debugTrace("pair:create:error", {
@@ -739,6 +760,8 @@ export default function HomePage() {
         receiverDeviceId: data.receiverDeviceId,
         receiverDeviceLabel: normalizeDeviceLabel(data.receiverDeviceLabel) || undefined,
       };
+      clearPairStatusPollTimer();
+      setPairingCode(null);
       savePairedReceiverInfo(linkedInfo);
       setPairState({
         status: "linked",
@@ -765,6 +788,7 @@ export default function HomePage() {
 
     setIsUnlinkingPair(true);
     try {
+      clearPairStatusPollTimer();
       await fetch("/api/pair/unlink", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -776,12 +800,79 @@ export default function HomePage() {
       });
       localStorage.removeItem(PAIRED_RECEIVER_STORAGE_KEY);
       setPairState({ status: "idle" });
+      setPairingCode(null);
       showToast("Vinculacion eliminada");
     } catch {
       showToast("No se pudo desvincular.");
     } finally {
       setIsUnlinkingPair(false);
     }
+  }
+
+  async function fetchPairStatusOnce(targetDeviceId: string): Promise<PairedReceiverInfo | null> {
+    const normalizedDeviceId = normalizeDeviceId(targetDeviceId);
+    if (!normalizedDeviceId) return null;
+
+    const res = await fetch(
+      `/api/pair/status?deviceId=${encodeURIComponent(normalizedDeviceId)}`
+    );
+    const data = (await res.json()) as {
+      linked?: boolean;
+      receiverDeviceId?: string;
+      receiverDeviceLabel?: string;
+    };
+    if (!res.ok || !data.linked || !data.receiverDeviceId) return null;
+
+    const receiverDeviceId = normalizeDeviceId(data.receiverDeviceId);
+    if (!receiverDeviceId) return null;
+
+    return {
+      receiverDeviceId,
+      receiverDeviceLabel: normalizeDeviceLabel(data.receiverDeviceLabel) || undefined,
+    };
+  }
+
+  function startPairStatusPolling(expiresInSeconds: number) {
+    if (!deviceId) return;
+    clearPairStatusPollTimer();
+
+    const startedAt = Date.now();
+    const timeoutMs = Math.max(10_000, expiresInSeconds * 1000);
+
+    const tick = async () => {
+      try {
+        const linkedInfo = await fetchPairStatusOnce(deviceId);
+        if (linkedInfo) {
+          savePairedReceiverInfo(linkedInfo);
+          setPairState({
+            status: "linked",
+            receiverDeviceId: linkedInfo.receiverDeviceId,
+            receiverDeviceLabel: linkedInfo.receiverDeviceLabel,
+          });
+          setPairingCode(null);
+          showToast("Dispositivo vinculado");
+          return;
+        }
+      } catch {
+        // silencioso: seguimos intentando hasta timeout.
+      }
+
+      if (Date.now() - startedAt >= timeoutMs) {
+        setPairState({
+          status: "error",
+          message: "Tiempo de espera agotado. Genera un nuevo código.",
+        });
+        return;
+      }
+
+      pairStatusPollTimerRef.current = window.setTimeout(() => {
+        void tick();
+      }, 1200);
+    };
+
+    pairStatusPollTimerRef.current = window.setTimeout(() => {
+      void tick();
+    }, 500);
   }
 
   async function pollNearbyOnce(): Promise<{
@@ -1035,6 +1126,7 @@ export default function HomePage() {
   useEffect(() => {
     return () => {
       clearNearbyPollTimer();
+      clearPairStatusPollTimer();
       if (toastTimerRef.current) {
         window.clearTimeout(toastTimerRef.current);
       }
@@ -1142,6 +1234,13 @@ export default function HomePage() {
             >
               {isUnlinkingPair ? "Desvinculando..." : "Desvincular"}
             </button>
+          </div>
+        )}
+        {pairState.status === "waiting" && (
+          <div className="mb-6 rounded-xl border border-cyan-300/35 bg-cyan-400/10 px-4 py-3 text-sm text-cyan-100">
+            <span className="inline-block animate-pulse">
+              Esperando dispositivo para completar vinculacion...
+            </span>
           </div>
         )}
 
@@ -1382,6 +1481,13 @@ export default function HomePage() {
                   >
                     Copiar código de sincronización
                   </button>
+                  {pairState.status === "waiting" && (
+                    <div className="rounded-xl border border-cyan-300/35 bg-cyan-400/15 px-3 py-2 text-xs text-cyan-100">
+                      <span className="inline-block animate-pulse">
+                        Esperando confirmacion del otro dispositivo...
+                      </span>
+                    </div>
+                  )}
                 </div>
               </div>
             )}
