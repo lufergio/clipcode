@@ -253,6 +253,7 @@ export default function HomePage() {
   const [deviceLabel, setDeviceLabel] = useState("");
   const [showApkDownloadButton, setShowApkDownloadButton] = useState(false);
   const [pendingAutoPairCode, setPendingAutoPairCode] = useState<string | null>(null);
+  const [isUnlinkingPair, setIsUnlinkingPair] = useState(false);
 
   const [toast, setToast] = useState<string | null>(null);
   const toastTimerRef = useRef<number | null>(null);
@@ -756,10 +757,31 @@ export default function HomePage() {
     }
   }
 
-  function handleUnlinkPair() {
-    localStorage.removeItem(PAIRED_RECEIVER_STORAGE_KEY);
-    setPairState({ status: "idle" });
-    showToast("Vinculacion eliminada");
+  async function handleUnlinkPair() {
+    if (!deviceId) {
+      showToast("No se pudo inicializar el dispositivo.");
+      return;
+    }
+
+    setIsUnlinkingPair(true);
+    try {
+      await fetch("/api/pair/unlink", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          senderDeviceId: deviceId,
+          receiverDeviceId:
+            pairState.status === "linked" ? pairState.receiverDeviceId : undefined,
+        }),
+      });
+      localStorage.removeItem(PAIRED_RECEIVER_STORAGE_KEY);
+      setPairState({ status: "idle" });
+      showToast("Vinculacion eliminada");
+    } catch {
+      showToast("No se pudo desvincular.");
+    } finally {
+      setIsUnlinkingPair(false);
+    }
   }
 
   async function pollNearbyOnce(): Promise<{
@@ -1106,6 +1128,23 @@ export default function HomePage() {
           </button>
         </div>
 
+        {pairState.status === "linked" && (
+          <div className="mb-6 rounded-xl border border-emerald-400/35 bg-emerald-400/10 px-4 py-3 text-sm text-emerald-100">
+            Vinculado con{" "}
+            <span className="font-semibold">
+              {pairState.receiverDeviceLabel || "dispositivo remoto"}
+            </span>
+            . Buscar cerca activo.
+            <button
+              onClick={() => void handleUnlinkPair()}
+              disabled={isUnlinkingPair}
+              className="ml-3 rounded-lg border border-emerald-300/30 bg-emerald-400/20 px-3 py-1 text-xs font-medium text-emerald-100 hover:bg-emerald-400/30 disabled:opacity-60"
+            >
+              {isUnlinkingPair ? "Desvinculando..." : "Desvincular"}
+            </button>
+          </div>
+        )}
+
         {tab === "send" && (
           <section className="rounded-3xl border border-white/10 bg-white/[0.04] p-5 shadow-2xl shadow-black/20 backdrop-blur sm:p-6">
             <h2 className="text-xl font-semibold text-white">Enviar contenido</h2>
@@ -1224,10 +1263,11 @@ export default function HomePage() {
                   . Buscar cerca disponible para este par.
                 </div>
                 <button
-                  onClick={handleUnlinkPair}
+                  onClick={() => void handleUnlinkPair()}
+                  disabled={isUnlinkingPair}
                   className="mt-2 rounded-lg border border-emerald-300/30 bg-emerald-400/20 px-3 py-1 text-xs font-medium text-emerald-100 hover:bg-emerald-400/30"
                 >
-                  Desvincular
+                  {isUnlinkingPair ? "Desvinculando..." : "Desvincular"}
                 </button>
               </div>
             )}

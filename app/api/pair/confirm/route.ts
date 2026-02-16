@@ -97,15 +97,31 @@ export async function POST(req: Request) {
         { status: 404 }
       );
     }
+    if (receiverDeviceId === senderDeviceId) {
+      return NextResponse.json(
+        { error: "Cannot pair a device with itself" },
+        { status: 400 }
+      );
+    }
 
-    const senderPairPayload: SenderPairPayload = {
+    const senderToReceiverPayload: SenderPairPayload = {
       receiverDeviceId,
       receiverDeviceLabel: receiverDeviceLabel || undefined,
       senderDeviceLabel: senderDeviceLabel || undefined,
     };
+    const receiverToSenderPayload: SenderPairPayload = {
+      receiverDeviceId: senderDeviceId,
+      receiverDeviceLabel: senderDeviceLabel || undefined,
+      senderDeviceLabel: receiverDeviceLabel || undefined,
+    };
     await redis.set(
       `clipcode:pair:sender:${senderDeviceId}`,
-      JSON.stringify(senderPairPayload),
+      JSON.stringify(senderToReceiverPayload),
+      { ex: PAIRING_TTL_SECONDS }
+    );
+    await redis.set(
+      `clipcode:pair:sender:${receiverDeviceId}`,
+      JSON.stringify(receiverToSenderPayload),
       { ex: PAIRING_TTL_SECONDS }
     );
     await redis.del(pairCodeKey);
