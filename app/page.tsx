@@ -40,12 +40,6 @@ type NearbyState =
   | { status: "empty" }
   | { status: "error"; message: string };
 
-type RoomState =
-  | { status: "idle" }
-  | { status: "loading" }
-  | { status: "active"; code: string; expiresIn?: number }
-  | { status: "error"; message: string };
-
 const TTL_OPTIONS = [
   { label: "3 min", value: 180 },
   { label: "5 min", value: 300 },
@@ -59,7 +53,6 @@ const MIN_VISIBLE_LINK_INPUTS = 3;
 const DEVICE_ID_STORAGE_KEY = "clipcode:device-id";
 const DEVICE_LABEL_STORAGE_KEY = "clipcode:device-label";
 const PAIRED_RECEIVER_STORAGE_KEY = "clipcode:paired-receiver";
-const ACTIVE_ROOM_CODE_STORAGE_KEY = "clipcode:active-room-code";
 const DEBUG_TRACE = process.env.NODE_ENV !== "production";
 
 type PairedReceiverInfo = {
@@ -89,13 +82,6 @@ function normalizeNumericCode(value: string, maxLength: number): string {
 
 function normalizeManualCode(value: string): string {
   return value.replace(/\D/g, "").slice(0, 5);
-}
-
-function normalizeRoomCode(value: unknown): string {
-  return String(value ?? "")
-    .trim()
-    .replace(/\D/g, "")
-    .slice(0, 6);
 }
 
 function normalizeDeviceId(value: unknown): string {
@@ -256,14 +242,12 @@ export default function HomePage() {
   const [receiveTextOpen, setReceiveTextOpen] = useState(true);
 
   const [pairCodeInput, setPairCodeInput] = useState("");
-  const [roomCodeInput, setRoomCodeInput] = useState("");
   const [pairingCode, setPairingCode] = useState<{
     code: string;
     expiresIn: number;
     createdAt: number;
   } | null>(null);
   const [pairState, setPairState] = useState<PairState>({ status: "idle" });
-  const [roomState, setRoomState] = useState<RoomState>({ status: "idle" });
   const [nearbyState, setNearbyState] = useState<NearbyState>({ status: "idle" });
   const [deviceId, setDeviceId] = useState("");
   const [deviceLabel, setDeviceLabel] = useState("");
@@ -385,14 +369,6 @@ export default function HomePage() {
         receiverDeviceId: pairedReceiver.receiverDeviceId,
         receiverDeviceLabel: pairedReceiver.receiverDeviceLabel,
       });
-    }
-
-    const storedRoomCode = normalizeRoomCode(
-      localStorage.getItem(ACTIVE_ROOM_CODE_STORAGE_KEY)
-    );
-    if (storedRoomCode.length === 6) {
-      setRoomCodeInput(storedRoomCode);
-      setRoomState({ status: "active", code: storedRoomCode });
     }
   }, []);
 
@@ -544,7 +520,6 @@ export default function HomePage() {
           ttlSeconds,
           senderDeviceId: deviceId || undefined,
           senderDeviceLabel: deviceLabel || undefined,
-          roomCode: roomState.status === "active" ? roomState.code : undefined,
         }),
       });
 
@@ -585,10 +560,6 @@ export default function HomePage() {
         const nearbyMessage =
           data.nearbyReason === "not_paired"
             ? "Codigo generado. Buscar cerca no activo: falta vincular dispositivos."
-            : data.nearbyReason === "room_not_found"
-              ? "Codigo generado. Sala no encontrada o expirada."
-              : data.nearbyReason === "room_empty"
-                ? "Codigo generado. Sala sin receptores activos."
             : "Codigo generado. Buscar cerca no activo para este envio.";
         showToast(nearbyMessage);
       } else {
@@ -617,133 +588,6 @@ export default function HomePage() {
 
   function onPairCodeChange(value: string) {
     setPairCodeInput(normalizeNumericCode(value, 6));
-  }
-
-  function onRoomCodeChange(value: string) {
-    setRoomCodeInput(normalizeRoomCode(value));
-  }
-
-  async function handleCreateRoom() {
-    if (!deviceId) {
-      showToast("No se pudo inicializar el dispositivo.");
-      return;
-    }
-
-    setRoomState({ status: "loading" });
-    try {
-      const res = await fetch("/api/room/create", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          hostDeviceId: deviceId,
-          hostDeviceLabel: deviceLabel || undefined,
-        }),
-      });
-      const data = (await res.json()) as {
-        roomCode?: string;
-        expiresIn?: number;
-        error?: string;
-      };
-
-      if (!res.ok || !data.roomCode) {
-        setRoomState({
-          status: "error",
-          message: data.error ?? "No se pudo crear la sala.",
-        });
-        return;
-      }
-
-      const roomCode = normalizeRoomCode(data.roomCode);
-      if (roomCode.length !== 6) {
-        setRoomState({
-          status: "error",
-          message: "No se pudo crear la sala.",
-        });
-        return;
-      }
-
-      if (typeof window !== "undefined") {
-        localStorage.setItem(ACTIVE_ROOM_CODE_STORAGE_KEY, roomCode);
-      }
-      setRoomCodeInput(roomCode);
-      setRoomState({
-        status: "active",
-        code: roomCode,
-        expiresIn: Number(data.expiresIn ?? 0) || undefined,
-      });
-      showToast("Sala creada");
-    } catch {
-      setRoomState({
-        status: "error",
-        message: "No se pudo crear la sala.",
-      });
-    }
-  }
-
-  async function handleJoinRoom() {
-    if (!deviceId) {
-      showToast("No se pudo inicializar el dispositivo.");
-      return;
-    }
-
-    const roomCode = normalizeRoomCode(roomCodeInput);
-    if (roomCode.length !== 6) {
-      setRoomState({
-        status: "error",
-        message: "Ingresa un RoomCode de 6 digitos.",
-      });
-      return;
-    }
-
-    setRoomState({ status: "loading" });
-    try {
-      const res = await fetch("/api/room/join", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          roomCode,
-          deviceId,
-          deviceLabel: deviceLabel || undefined,
-        }),
-      });
-      const data = (await res.json()) as {
-        roomCode?: string;
-        expiresIn?: number;
-        error?: string;
-      };
-
-      if (!res.ok) {
-        setRoomState({
-          status: "error",
-          message: data.error ?? "No se pudo unir a la sala.",
-        });
-        return;
-      }
-
-      if (typeof window !== "undefined") {
-        localStorage.setItem(ACTIVE_ROOM_CODE_STORAGE_KEY, roomCode);
-      }
-      setRoomCodeInput(roomCode);
-      setRoomState({
-        status: "active",
-        code: roomCode,
-        expiresIn: Number(data.expiresIn ?? 0) || undefined,
-      });
-      showToast("Unido a la sala");
-    } catch {
-      setRoomState({
-        status: "error",
-        message: "No se pudo unir a la sala.",
-      });
-    }
-  }
-
-  function handleLeaveRoom() {
-    if (typeof window !== "undefined") {
-      localStorage.removeItem(ACTIVE_ROOM_CODE_STORAGE_KEY);
-    }
-    setRoomState({ status: "idle" });
-    showToast("Sala desactivada en este dispositivo");
   }
 
   async function handleCreatePairCode() {
@@ -1175,53 +1019,6 @@ export default function HomePage() {
               placeholder="Ej: TV Sala, iPhone Luis"
               className="w-full rounded-xl border border-white/10 bg-[#0e1119] px-3 py-2.5 text-sm outline-none transition focus:border-cyan-300/70 focus:ring-2 focus:ring-cyan-200/20"
             />
-          </div>
-
-          <div className="mt-3 rounded-2xl border border-cyan-300/20 bg-cyan-400/10 p-4 shadow-2xl shadow-black/20 backdrop-blur">
-            <label className="mb-2 block text-xs font-semibold uppercase tracking-[0.12em] text-cyan-100/90">
-              RoomCode temporal (sin vincular)
-            </label>
-            <div className="flex flex-wrap gap-2">
-              <input
-                value={roomCodeInput}
-                onChange={(event) => onRoomCodeChange(event.target.value)}
-                inputMode="numeric"
-                pattern="[0-9]*"
-                placeholder="123456"
-                className="min-w-[180px] flex-1 rounded-xl border border-cyan-200/20 bg-[#0d1018] px-4 py-2.5 text-center text-base tracking-widest outline-none transition focus:border-cyan-300/70 focus:ring-2 focus:ring-cyan-200/20"
-              />
-              <button
-                onClick={() => void handleCreateRoom()}
-                disabled={roomState.status === "loading"}
-                className="rounded-xl bg-gradient-to-r from-cyan-300 to-blue-300 px-4 py-2 text-sm font-semibold text-slate-950 transition hover:brightness-110 disabled:opacity-60"
-              >
-                Crear sala
-              </button>
-              <button
-                onClick={() => void handleJoinRoom()}
-                disabled={roomState.status === "loading"}
-                className="rounded-xl border border-cyan-200/30 bg-cyan-400/20 px-4 py-2 text-sm font-semibold text-cyan-100 transition hover:bg-cyan-400/30 disabled:opacity-60"
-              >
-                Unirme
-              </button>
-              <button
-                onClick={handleLeaveRoom}
-                disabled={roomState.status !== "active"}
-                className="rounded-xl border border-white/15 bg-white/10 px-4 py-2 text-sm font-medium text-slate-100 transition hover:bg-white/15 disabled:opacity-50"
-              >
-                Salir
-              </button>
-            </div>
-
-            {roomState.status === "active" && (
-              <div className="mt-2 text-xs text-cyan-100/90">
-                Sala activa: <span className="font-semibold tracking-widest">{roomState.code}</span>
-                {roomState.expiresIn ? ` | expira aprox. en ${Math.ceil(roomState.expiresIn / 60)} min` : ""}
-              </div>
-            )}
-            {roomState.status === "error" && (
-              <div className="mt-2 text-xs text-rose-200">{roomState.message}</div>
-            )}
           </div>
         </header>
 
