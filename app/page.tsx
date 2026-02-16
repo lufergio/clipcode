@@ -41,6 +41,15 @@ type NearbyState =
   | { status: "empty" }
   | { status: "error"; message: string };
 
+type ReceivedHistoryItem = {
+  id: string;
+  code: string;
+  links: string[];
+  text?: string;
+  sourceDeviceLabel?: string;
+  receivedAt: number;
+};
+
 const TTL_OPTIONS = [
   { label: "3 min", value: 180 },
   { label: "5 min", value: 300 },
@@ -273,18 +282,30 @@ function CopyIcon() {
   );
 }
 
+function TextIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" className="h-4 w-4">
+      <path
+        d="M4 5h16v2h-7v12h-2V7H4V5Zm-1 6h8v2H3v-2Zm0 4h8v2H3v-2Z"
+        fill="currentColor"
+      />
+    </svg>
+  );
+}
+
 export default function HomePage() {
   const [tab, setTab] = useState<"send" | "receive">("send");
 
   const [linkInputs, setLinkInputs] = useState<string[]>(["", "", ""]);
   const [showTextComposer, setShowTextComposer] = useState(false);
   const [text, setText] = useState("");
-  const [ttlSeconds, setTtlSeconds] = useState(300);
+  const [ttlSeconds, setTtlSeconds] = useState(3600);
   const [sendState, setSendState] = useState<SendState>({ status: "idle" });
 
   const [codeInput, setCodeInput] = useState("");
   const [receiveState, setReceiveState] = useState<ReceiveState>({ status: "idle" });
   const [receiveTextOpen, setReceiveTextOpen] = useState(true);
+  const [receiveHistory, setReceiveHistory] = useState<ReceivedHistoryItem[]>([]);
 
   const [pairCodeInput, setPairCodeInput] = useState("");
   const [pairingCode, setPairingCode] = useState<{
@@ -536,6 +557,11 @@ export default function HomePage() {
         links,
         text: receivedText || undefined,
         sourceDeviceLabel: undefined,
+      });
+      appendReceivedHistory({
+        code: String(data?.code ?? code),
+        links,
+        text: receivedText || undefined,
       });
       setNearbyState({ status: "idle" });
     } catch {
@@ -853,6 +879,54 @@ export default function HomePage() {
     }
   }
 
+  async function pasteTextComposer() {
+    try {
+      const raw = await navigator.clipboard.readText();
+      const next = String(raw ?? "");
+      if (!next.trim()) {
+        showToast("Portapapeles vacio");
+        return;
+      }
+      setText(next);
+      setShowTextComposer(true);
+      showToast("Texto pegado");
+    } catch {
+      showToast("No se pudo pegar");
+    }
+  }
+
+  function clearTextComposer() {
+    setText("");
+  }
+
+  function appendReceivedHistory(item: {
+    code: string;
+    links: string[];
+    text?: string;
+    sourceDeviceLabel?: string;
+  }) {
+    const normalizedCode = String(item.code ?? "").trim().toUpperCase() || "PAIR";
+    const normalizedLinks = Array.isArray(item.links)
+      ? item.links.map((value) => String(value ?? "").trim()).filter(Boolean)
+      : [];
+    const normalizedText = String(item.text ?? "").trim();
+    if (!normalizedLinks.length && !normalizedText) return;
+
+    const entry: ReceivedHistoryItem = {
+      id:
+        typeof crypto !== "undefined" && "randomUUID" in crypto
+          ? crypto.randomUUID()
+          : `rx_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      code: normalizedCode,
+      links: normalizedLinks,
+      text: normalizedText || undefined,
+      sourceDeviceLabel: normalizeDeviceLabel(item.sourceDeviceLabel) || undefined,
+      receivedAt: Date.now(),
+    };
+
+    setReceiveHistory((prev) => [entry, ...prev].slice(0, 40));
+  }
+
   async function pasteLinkAt(index: number) {
     try {
       const raw = await navigator.clipboard.readText();
@@ -1072,6 +1146,12 @@ export default function HomePage() {
           setReceiveTextOpen(true);
           setReceiveState({
             status: "success",
+            code: result.item.code ?? "PAIR",
+            links: result.item.links,
+            text: result.item.text,
+            sourceDeviceLabel: result.item.senderDeviceLabel,
+          });
+          appendReceivedHistory({
             code: result.item.code ?? "PAIR",
             links: result.item.links,
             text: result.item.text,
@@ -1383,9 +1463,32 @@ export default function HomePage() {
 
             {showTextComposer && (
               <div className="mt-4">
-                <label className="mb-2 block text-sm font-medium text-slate-200">
-                  Texto (opcional)
-                </label>
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <label className="block text-sm font-medium text-slate-200">
+                    Texto (opcional)
+                  </label>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      title="Pegar texto"
+                      aria-label="Pegar texto"
+                      onClick={() => void pasteTextComposer()}
+                      className="inline-flex h-9 items-center gap-1 rounded-xl border border-cyan-200/30 bg-cyan-400/15 px-3 text-xs font-medium text-cyan-100 transition hover:bg-cyan-400/25"
+                    >
+                      <PasteIcon />
+                      <TextIcon />
+                    </button>
+                    <button
+                      type="button"
+                      title="Borrar texto"
+                      aria-label="Borrar texto"
+                      onClick={clearTextComposer}
+                      className="inline-flex h-9 items-center justify-center rounded-xl border border-rose-300/30 bg-rose-400/15 px-3 text-xs font-medium text-rose-100 transition hover:bg-rose-400/25"
+                    >
+                      <TrashIcon />
+                    </button>
+                  </div>
+                </div>
                 <textarea
                   ref={sendTextareaRef}
                   value={text}
@@ -1699,6 +1802,84 @@ export default function HomePage() {
                     </button>
                   </div>
                 )}
+              </div>
+            )}
+
+            {!!receiveHistory.length && (
+              <div className="mt-6 rounded-2xl border border-white/10 bg-[#0b0f17] p-4">
+                <div className="mb-3 flex items-center justify-between gap-2">
+                  <h3 className="text-sm font-semibold text-slate-200">
+                    Historial recibido
+                  </h3>
+                  <button
+                    onClick={() => setReceiveHistory([])}
+                    className="rounded-lg border border-white/15 bg-white/10 px-3 py-1 text-xs font-medium text-slate-100 transition hover:bg-white/15"
+                  >
+                    Limpiar historial
+                  </button>
+                </div>
+                <div className="space-y-3">
+                  {receiveHistory.map((entry) => (
+                    <div
+                      key={entry.id}
+                      className="rounded-xl border border-white/10 bg-[#101522] p-3"
+                    >
+                      <div className="mb-2 flex flex-wrap items-center gap-2 text-xs text-slate-400">
+                        <span>
+                          Codigo: <span className="font-semibold text-slate-200">{entry.code}</span>
+                        </span>
+                        <span>
+                          {new Date(entry.receivedAt).toLocaleTimeString([], {
+                            hour: "2-digit",
+                            minute: "2-digit",
+                          })}
+                        </span>
+                        {entry.sourceDeviceLabel && (
+                          <span>
+                            Desde:{" "}
+                            <span className="font-semibold text-slate-200">
+                              {entry.sourceDeviceLabel}
+                            </span>
+                          </span>
+                        )}
+                      </div>
+
+                      {!!entry.links.length && (
+                        <div className="space-y-2">
+                          {entry.links.map((link, index) => (
+                            <div key={`${entry.id}-${link}-${index}`}>
+                              <div className="text-sm text-slate-200">{shortenLink(link)}</div>
+                              <div className="mt-2 flex flex-wrap gap-2">
+                                <a
+                                  href={link}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="inline-flex items-center gap-2 rounded-xl border border-cyan-300/30 bg-cyan-400/20 px-3 py-1.5 text-xs font-medium text-cyan-100 transition hover:bg-cyan-400/30"
+                                >
+                                  <OpenIcon />
+                                  <span>Abrir</span>
+                                </a>
+                                <button
+                                  onClick={() => void copyToClipboard(link)}
+                                  className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-cyan-300 to-blue-300 px-3 py-1.5 text-xs font-semibold text-slate-950"
+                                >
+                                  <CopyIcon />
+                                  <span>Copiar</span>
+                                </button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      {entry.text && (
+                        <div className="mt-3 rounded-lg border border-white/10 bg-[#0b0f17] p-2 text-sm text-slate-100">
+                          <pre className="whitespace-pre-wrap break-words">{entry.text}</pre>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
               </div>
             )}
           </section>

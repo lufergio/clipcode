@@ -12,6 +12,11 @@ type NearbyPayload = {
   createdAt?: number;
 };
 
+type NearbyQueuePayload = {
+  version?: number;
+  items?: NearbyPayload[];
+};
+
 function normalizeDeviceId(value: string | null): string {
   const normalized = String(value ?? "").trim();
   if (!normalized) return "";
@@ -29,6 +34,57 @@ function normalizeMessageId(value: unknown): string {
 function debugTrace(event: string, details: Record<string, unknown>) {
   if (!DEBUG_TRACE) return;
   console.info("[clipcode][api][nearby/poll]", event, details);
+}
+
+function normalizeNearbyPayload(input: NearbyPayload | null | undefined): NearbyPayload | null {
+  const links = Array.isArray(input?.links)
+    ? input!.links.map((value) => String(value ?? "").trim()).filter(Boolean)
+    : [];
+  const text = String(input?.text ?? "").trim();
+  const code = String(input?.code ?? "").trim().toUpperCase();
+  const messageId = normalizeMessageId(input?.messageId);
+  const senderDeviceLabel = String(input?.senderDeviceLabel ?? "").trim().slice(0, 40);
+
+  if (!links.length && !text) return null;
+
+  return {
+    messageId: messageId || undefined,
+    code: code || undefined,
+    links,
+    text: text || undefined,
+    senderDeviceLabel: senderDeviceLabel || undefined,
+    createdAt:
+      Number.isFinite(Number(input?.createdAt)) && Number(input?.createdAt) > 0
+        ? Number(input?.createdAt)
+        : Date.now(),
+  };
+}
+
+function parseNearbyItems(raw: string | NearbyPayload | NearbyQueuePayload | null): NearbyPayload[] {
+  if (!raw) return [];
+
+  const parsed = (() => {
+    if (typeof raw === "string") {
+      try {
+        return JSON.parse(raw) as unknown;
+      } catch {
+        return null;
+      }
+    }
+    return raw;
+  })();
+
+  if (!parsed || typeof parsed !== "object") return [];
+
+  const maybeQueue = parsed as NearbyQueuePayload;
+  if (Array.isArray(maybeQueue.items)) {
+    return maybeQueue.items
+      .map((item) => normalizeNearbyPayload(item))
+      .filter(Boolean) as NearbyPayload[];
+  }
+
+  const single = normalizeNearbyPayload(parsed as NearbyPayload);
+  return single ? [single] : [];
 }
 
 /**
@@ -54,7 +110,7 @@ export async function GET(req: Request) {
     }
 
     const key = `clipcode:nearby:${receiverDeviceId}`;
-    const raw = await redis.get<string | NearbyPayload>(key);
+    const raw = await redis.get<string | NearbyPayload | NearbyQueuePayload>(key);
     debugTrace("lookup", {
       receiverDeviceId,
       key,
@@ -65,30 +121,8 @@ export async function GET(req: Request) {
       return NextResponse.json({ found: false }, { status: 200 });
     }
 
-    let payload: NearbyPayload = {};
-    if (typeof raw === "string") {
-      try {
-        payload = JSON.parse(raw) as NearbyPayload;
-      } catch {
-        payload = {};
-      }
-    } else {
-      payload = raw;
-    }
-
-    const links = Array.isArray(payload.links)
-      ? payload.links
-          .map((value) => String(value ?? "").trim())
-          .filter(Boolean)
-      : [];
-    const text = String(payload.text ?? "").trim();
-    const code = String(payload.code ?? "").trim().toUpperCase();
-    const messageId = normalizeMessageId(payload.messageId);
-    const senderDeviceLabel = String(payload.senderDeviceLabel ?? "")
-      .trim()
-      .slice(0, 40);
-
-    if (!links.length && !text) {
+    const items = parseNearbyItems(raw);
+    if (!items.length) {
       await redis.del(key);
       debugTrace("discarded-empty", {
         receiverDeviceId,
@@ -96,9 +130,27 @@ export async function GET(req: Request) {
       return NextResponse.json({ found: false }, { status: 200 });
     }
 
+    const currentItem = items[0];
+    const links = Array.isArray(currentItem.links) ? currentItem.links : [];
+    const text = String(currentItem.text ?? "").trim();
+    const code = String(currentItem.code ?? "").trim().toUpperCase();
+    const messageId = normalizeMessageId(currentItem.messageId);
+    const senderDeviceLabel = String(currentItem.senderDeviceLabel ?? "").trim().slice(0, 40);
+
     // Compatibilidad con payloads sin messageId: consume inmediato.
     if (!messageId) {
-      await redis.del(key);
+      const remaining = items.slice(1);
+      if (remaining.length) {
+        const ttl = await redis.ttl(key);
+        const ex = ttl > 0 ? ttl : 60;
+        await redis.set(
+          key,
+          JSON.stringify({ version: 2, items: remaining } satisfies NearbyQueuePayload),
+          { ex }
+        );
+      } else {
+        await redis.del(key);
+      }
       debugTrace("consumed-legacy", {
         receiverDeviceId,
         code: code || null,
@@ -113,6 +165,7 @@ export async function GET(req: Request) {
       code: code || null,
       linksCount: links.length,
       hasText: Boolean(text),
+      queueLength: items.length,
     });
 
     return NextResponse.json({

@@ -7,6 +7,11 @@ type NearbyPayload = {
   messageId?: string;
 };
 
+type NearbyQueuePayload = {
+  version?: number;
+  items?: NearbyPayload[];
+};
+
 type NearbyAckBody = {
   receiverDeviceId?: unknown;
   messageId?: unknown;
@@ -31,6 +36,29 @@ function debugTrace(event: string, details: Record<string, unknown>) {
   console.info("[clipcode][api][nearby/ack]", event, details);
 }
 
+function parseNearbyItems(raw: string | NearbyPayload | NearbyQueuePayload | null): NearbyPayload[] {
+  if (!raw) return [];
+
+  const parsed = (() => {
+    if (typeof raw === "string") {
+      try {
+        return JSON.parse(raw) as unknown;
+      } catch {
+        return null;
+      }
+    }
+    return raw;
+  })();
+
+  if (!parsed || typeof parsed !== "object") return [];
+
+  const maybeQueue = parsed as NearbyQueuePayload;
+  if (Array.isArray(maybeQueue.items)) {
+    return maybeQueue.items;
+  }
+  return [parsed as NearbyPayload];
+}
+
 /**
  * POST /api/nearby/ack
  * Body: { receiverDeviceId: string; messageId: string }
@@ -49,38 +77,46 @@ export async function POST(req: Request) {
     }
 
     const key = `clipcode:nearby:${receiverDeviceId}`;
-    const raw = await redis.get<string | NearbyPayload>(key);
+    const raw = await redis.get<string | NearbyPayload | NearbyQueuePayload>(key);
 
     if (!raw) {
       debugTrace("ack:not-found", { receiverDeviceId, messageId });
       return NextResponse.json({ ok: true, consumed: false }, { status: 200 });
     }
 
-    let payload: NearbyPayload = {};
-    if (typeof raw === "string") {
-      try {
-        payload = JSON.parse(raw) as NearbyPayload;
-      } catch {
-        payload = {};
-      }
-    } else {
-      payload = raw;
-    }
+    const items = parseNearbyItems(raw);
+    const remaining = items.filter(
+      (item) => normalizeMessageId(item.messageId) !== messageId
+    );
+    const consumed = remaining.length < items.length;
 
-    const storedMessageId = normalizeMessageId(payload.messageId);
-    if (!storedMessageId || storedMessageId !== messageId) {
+    if (!consumed) {
       debugTrace("ack:mismatch", {
         receiverDeviceId,
         messageId,
-        storedMessageId: storedMessageId || null,
+        queueLength: items.length,
       });
       return NextResponse.json({ ok: true, consumed: false }, { status: 200 });
     }
 
-    await redis.del(key);
+    if (!remaining.length) {
+      await redis.del(key);
+    } else {
+      const ttl = await redis.ttl(key);
+      const ex = ttl > 0 ? ttl : 60;
+      await redis.set(
+        key,
+        JSON.stringify({
+          version: 2,
+          items: remaining,
+        } satisfies NearbyQueuePayload),
+        { ex }
+      );
+    }
     debugTrace("ack:consumed", {
       receiverDeviceId,
       messageId,
+      queueLength: remaining.length,
     });
 
     return NextResponse.json({ ok: true, consumed: true }, { status: 200 });

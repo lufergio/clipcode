@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { redis } from "@/lib/redis";
 import { generateNumericCode } from "@/lib/code-generator";
 
-const DEFAULT_TTL_SECONDS = 300; // 5 minutos
+const DEFAULT_TTL_SECONDS = 3600; // 60 minutos (default)
 const ALLOWED_TTLS = new Set([180, 300, 600, 1800, 3600]); // 3, 5, 10, 30, 60 min
 const MAX_TEXT_SIZE = 5_000;
 const MAX_LINKS = 10;
@@ -78,6 +78,11 @@ type NearbyPayload = {
   createdAt: number;
 };
 
+type NearbyQueuePayload = {
+  version: 2;
+  items: NearbyPayload[];
+};
+
 function isHttpUrl(value: string): boolean {
   try {
     const url = new URL(value);
@@ -104,6 +109,75 @@ function createMessageId(): string {
 function debugTrace(event: string, details: Record<string, unknown>) {
   if (!DEBUG_TRACE) return;
   console.info("[clipcode][api][share]", event, details);
+}
+
+function normalizeNearbyPayload(input: unknown): NearbyPayload | null {
+  const payload = input as NearbyPayload | undefined;
+  const messageId = String(payload?.messageId ?? "").trim();
+  const code = String(payload?.code ?? "").trim().toUpperCase();
+  const links = Array.isArray(payload?.links)
+    ? payload!.links.map((value) => String(value ?? "").trim()).filter(Boolean)
+    : [];
+  const text = String(payload?.text ?? "").trim();
+  const senderDeviceLabel = String(payload?.senderDeviceLabel ?? "").trim().slice(0, 40);
+  const createdAt = Number(payload?.createdAt);
+
+  if (!messageId) return null;
+  if (!links.length && !text) return null;
+
+  return {
+    messageId,
+    code,
+    links,
+    text: text || undefined,
+    senderDeviceLabel: senderDeviceLabel || undefined,
+    createdAt: Number.isFinite(createdAt) && createdAt > 0 ? createdAt : Date.now(),
+  };
+}
+
+function parseNearbyQueue(raw: string | NearbyPayload | NearbyQueuePayload | null): NearbyPayload[] {
+  if (!raw) return [];
+
+  const parsed = (() => {
+    if (typeof raw === "string") {
+      try {
+        return JSON.parse(raw) as unknown;
+      } catch {
+        return null;
+      }
+    }
+    return raw;
+  })();
+
+  if (!parsed || typeof parsed !== "object") return [];
+
+  const maybeQueue = parsed as NearbyQueuePayload;
+  if (Array.isArray(maybeQueue.items)) {
+    return maybeQueue.items.map((item) => normalizeNearbyPayload(item)).filter(Boolean) as NearbyPayload[];
+  }
+
+  const legacyItem = normalizeNearbyPayload(parsed);
+  return legacyItem ? [legacyItem] : [];
+}
+
+async function enqueueNearbyItem(
+  receiverDeviceId: string,
+  item: NearbyPayload,
+  ttlSeconds: number
+): Promise<number> {
+  const key = `clipcode:nearby:${receiverDeviceId}`;
+  const raw = await redis.get<string | NearbyPayload | NearbyQueuePayload>(key);
+  const items = parseNearbyQueue(raw);
+  items.push(item);
+  await redis.set(
+    key,
+    JSON.stringify({
+      version: 2,
+      items,
+    } satisfies NearbyQueuePayload),
+    { ex: ttlSeconds }
+  );
+  return items.length;
 }
 
 /**
@@ -253,11 +327,7 @@ export async function POST(req: Request) {
           senderDeviceLabel: senderDeviceLabel || undefined,
           createdAt: Date.now(),
         };
-        await redis.set(
-          `clipcode:nearby:${receiverDeviceId}`,
-          JSON.stringify(nearbyPayload),
-          { ex: ttlSeconds }
-        );
+        const queueLength = await enqueueNearbyItem(receiverDeviceId, nearbyPayload, ttlSeconds);
         nearbyQueued = true;
         nearbyReason = "queued";
         debugTrace("nearby:stored", {
@@ -266,6 +336,7 @@ export async function POST(req: Request) {
           code,
           ttlSeconds,
           messageId: nearbyPayload.messageId,
+          queueLength,
         });
 
         // Refresca vigencia del pairing activo.
