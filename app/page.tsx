@@ -1008,6 +1008,16 @@ export default function HomePage() {
           <p className="mt-3 max-w-2xl text-sm text-slate-300 sm:text-base">
             Comparte links y texto entre dispositivos con un codigo. Sin cuenta.
           </p>
+          <div className="mt-4">
+            <a
+              href="https://github.com/lufergio/clipcode/releases/download/android-v1.0.0/clipecapp.apk"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center rounded-xl bg-gradient-to-r from-cyan-300 to-blue-300 px-4 py-2 text-sm font-semibold text-slate-950 transition hover:brightness-110"
+            >
+              Descargar APK
+            </a>
+          </div>
           <div className="mt-5 rounded-2xl border border-white/10 bg-white/[0.04] p-4 shadow-2xl shadow-black/20 backdrop-blur">
             <label className="mb-2 block text-xs font-semibold uppercase tracking-[0.12em] text-slate-300">
               Nombre de este dispositivo
