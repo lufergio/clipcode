@@ -943,7 +943,7 @@ export default function HomePage() {
           <div className="inline-flex items-center rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs font-medium text-slate-200 backdrop-blur">
             Transferencia rapida entre dispositivos
           </div>
-          <h1 className="mt-3 text-4xl font-semibold tracking-tight text-white sm:text-5xl">
+          <h1 className="mt-3 text-center text-4xl font-semibold tracking-tight text-white sm:text-5xl">
             ClipCode
           </h1>
           <p className="mt-3 max-w-2xl text-sm text-slate-300 sm:text-base">
