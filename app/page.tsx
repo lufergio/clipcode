@@ -96,9 +96,43 @@ function createDeviceId(): string {
   return `dev${Math.random().toString(36).slice(2, 14)}`;
 }
 
+function inferPlatformName(): string {
+  if (typeof navigator === "undefined") return "";
+  const uaData = (
+    navigator as Navigator & { userAgentData?: { platform?: string; mobile?: boolean } }
+  ).userAgentData;
+  const platformRaw = String(uaData?.platform ?? navigator.platform ?? "").toLowerCase();
+  const userAgent = navigator.userAgent.toLowerCase();
+
+  if (platformRaw.includes("iphone") || userAgent.includes("iphone")) return "iPhone";
+  if (platformRaw.includes("ipad") || userAgent.includes("ipad")) return "iPad";
+  if (platformRaw.includes("android") || userAgent.includes("android")) return "Android";
+  if (platformRaw.includes("mac")) return "Mac";
+  if (platformRaw.includes("win")) return "Windows";
+  if (platformRaw.includes("linux")) return "Linux";
+  if (uaData?.mobile) return "Movil";
+  return "";
+}
+
+function inferBrowserName(): string {
+  if (typeof navigator === "undefined") return "";
+  const ua = navigator.userAgent.toLowerCase();
+
+  if (ua.includes("edg/")) return "Edge";
+  if (ua.includes("opr/") || ua.includes("opera")) return "Opera";
+  if (ua.includes("firefox/")) return "Firefox";
+  if (ua.includes("safari/") && !ua.includes("chrome/")) return "Safari";
+  if (ua.includes("chrome/")) return "Chrome";
+  return "";
+}
+
 function fallbackDeviceLabel(deviceId: string): string {
   const shortId = deviceId.slice(-4).toUpperCase();
-  return shortId ? `Dispositivo ${shortId}` : "Mi dispositivo";
+  const platformName = inferPlatformName();
+  const browserName = inferBrowserName();
+  const labelBase = [platformName, browserName].filter(Boolean).join(" - ");
+  const labelWithId = [labelBase || "Dispositivo", shortId].filter(Boolean).join(" ");
+  return normalizeDeviceLabel(labelWithId || "Mi dispositivo");
 }
 
 function shortenLink(value: string): string {
@@ -881,8 +915,8 @@ export default function HomePage() {
 
   const pairLink = useMemo(() => {
     if (!pairingCode) return "";
-    if (typeof window === "undefined") return `/?pair=${pairingCode.code}`;
-    return `${window.location.origin}/?pair=${pairingCode.code}`;
+    if (typeof window === "undefined") return `/open?pair=${pairingCode.code}`;
+    return `${window.location.origin}/open?pair=${pairingCode.code}`;
   }, [pairingCode]);
 
   return (
