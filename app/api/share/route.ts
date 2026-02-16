@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { redis } from "@/lib/redis";
-import { generateCode } from "@/lib/code-generator";
+import { generateNumericCode } from "@/lib/code-generator";
 
 const DEFAULT_TTL_SECONDS = 300; // 5 minutos
 const ALLOWED_TTLS = new Set([180, 300, 600, 1800, 3600]); // 3, 5, 10, 30, 60 min
@@ -8,6 +8,8 @@ const MAX_TEXT_SIZE = 5_000;
 const MAX_LINKS = 10;
 const MAX_LINK_SIZE = 2_000;
 const PAIRING_TTL_SECONDS = 60 * 60 * 24 * 30; // 30 dias
+const MIN_MANUAL_CODE_LENGTH = 3;
+const MAX_MANUAL_CODE_LENGTH = 5;
 const DEBUG_TRACE = process.env.NODE_ENV !== "production";
 type RateLimitError = Error & { resetSeconds?: number };
 
@@ -175,7 +177,10 @@ export async function POST(req: Request) {
     // Intentamos generar un código único (máx 5 intentos)
     let code = "";
     for (let i = 0; i < 5; i++) {
-      const candidate = generateCode(4);
+      const length =
+        MIN_MANUAL_CODE_LENGTH +
+        Math.floor(Math.random() * (MAX_MANUAL_CODE_LENGTH - MIN_MANUAL_CODE_LENGTH + 1));
+      const candidate = generateNumericCode(length);
       const exists = await redis.exists(`clipcode:${candidate}`);
       if (!exists) {
         code = candidate;
@@ -203,6 +208,7 @@ export async function POST(req: Request) {
     });
     debugTrace("stored-code", {
       code,
+      codeLength: code.length,
       ttlSeconds,
     });
 

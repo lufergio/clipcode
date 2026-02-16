@@ -66,9 +66,8 @@ export async function GET(
     });
 
     const { code: rawCode } = await context.params;
-
-    const code = String(rawCode ?? "").trim().toUpperCase();
-    if (!code || code.length > 12) {
+    const code = String(rawCode ?? "").trim().replace(/\D/g, "");
+    if (!code || code.length < 3 || code.length > 5) {
       return NextResponse.json({ error: "Invalid code" }, { status: 400 });
     }
 

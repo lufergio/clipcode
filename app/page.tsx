@@ -74,6 +74,10 @@ function normalizeNumericCode(value: string, maxLength: number): string {
   return value.replace(/\D/g, "").slice(0, maxLength);
 }
 
+function normalizeManualCode(value: string): string {
+  return value.replace(/\D/g, "").slice(0, 5);
+}
+
 function normalizeDeviceId(value: unknown): string {
   const normalized = String(value ?? "").trim();
   if (!normalized) return "";
@@ -294,12 +298,12 @@ export default function HomePage() {
   }, [sendState.status]);
 
   async function handleFetch(codeRaw?: string) {
-    const code = normalizeCode(String(codeRaw ?? codeInput), 4);
+    const code = normalizeManualCode(String(codeRaw ?? codeInput));
 
-    if (code.length < 4) {
+    if (code.length < 3) {
       setReceiveState({
         status: "error",
-        message: "Ingresa el codigo completo (4 caracteres).",
+        message: "Ingresa un codigo de 3 a 5 digitos.",
       });
       return;
     }
@@ -475,10 +479,10 @@ export default function HomePage() {
   }
 
   function onCodeChange(value: string) {
-    const cleaned = normalizeCode(value, 4);
+    const cleaned = normalizeManualCode(value);
     setCodeInput(cleaned);
 
-    if (cleaned.length === 4) {
+    if (cleaned.length === 5) {
       void handleFetch(cleaned);
     }
   }
@@ -821,10 +825,12 @@ export default function HomePage() {
     if (codeFromUrl) {
       didAutoProcessRef.current = true;
 
-      const normalized = normalizeCode(codeFromUrl, 4);
+      const normalized = normalizeManualCode(codeFromUrl);
       setTab("receive");
       setCodeInput(normalized);
-      void handleFetch(normalized);
+      if (normalized.length >= 3) {
+        void handleFetch(normalized);
+      }
       window.history.replaceState(null, "", "/");
       return;
     }
@@ -1185,9 +1191,9 @@ export default function HomePage() {
                 value={codeInput}
                 onChange={(event) => onCodeChange(event.target.value)}
                 className="mt-3 w-full rounded-xl bg-neutral-900 p-3 text-center text-2xl tracking-widest outline-none ring-1 ring-neutral-800 focus:ring-2 focus:ring-neutral-400"
-                placeholder="A7F3"
-                inputMode="text"
-                autoCapitalize="characters"
+                placeholder="12345"
+                inputMode="numeric"
+                pattern="[0-9]*"
               />
               <div className="mt-3 flex gap-2">
                 <button
