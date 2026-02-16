@@ -961,7 +961,7 @@ export default function HomePage() {
                 onClick={() => void handleCreatePairCode()}
                 className="rounded-xl bg-neutral-50 px-5 py-3 text-base font-semibold text-neutral-950 hover:opacity-90"
               >
-                Generar pair code
+                Vincular con código
               </button>
               <button
                 onClick={() => void handleNearbySearch()}
