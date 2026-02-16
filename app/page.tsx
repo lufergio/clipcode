@@ -159,11 +159,41 @@ function inferBrowserName(): string {
   return "";
 }
 
+function inferDeviceBrand(): string {
+  if (typeof navigator === "undefined") return "";
+  const ua = navigator.userAgent.toLowerCase();
+  const platformName = inferPlatformName();
+
+  if (platformName === "iPhone" || platformName === "iPad" || platformName === "Mac") {
+    return "Apple";
+  }
+  if (ua.includes("samsung")) return "Samsung";
+  if (ua.includes("huawei") || ua.includes("honor")) return "Huawei";
+  if (ua.includes("xiaomi") || ua.includes("redmi") || ua.includes("miui")) return "Xiaomi";
+  if (ua.includes("oneplus")) return "OnePlus";
+  if (ua.includes("motorola") || ua.includes("moto")) return "Motorola";
+  if (ua.includes("pixel")) return "Google";
+  if (ua.includes("nokia")) return "Nokia";
+  if (ua.includes("oppo")) return "OPPO";
+  if (ua.includes("vivo")) return "vivo";
+  if (ua.includes("realme")) return "realme";
+  if (ua.includes("lenovo")) return "Lenovo";
+  if (ua.includes("sony")) return "Sony";
+  if (ua.includes("asus")) return "ASUS";
+  if (ua.includes("acer")) return "Acer";
+  if (ua.includes("msi")) return "MSI";
+  if (ua.includes("dell")) return "Dell";
+  if (ua.includes("hp") || ua.includes("hewlett-packard")) return "HP";
+  if (ua.includes("thinkpad")) return "Lenovo";
+  return "";
+}
+
 function fallbackDeviceLabel(deviceId: string): string {
   const shortId = deviceId.slice(-4).toUpperCase();
+  const brandName = inferDeviceBrand();
   const platformName = inferPlatformName();
   const browserName = inferBrowserName();
-  const labelBase = [platformName, browserName].filter(Boolean).join(" - ");
+  const labelBase = [brandName, platformName, browserName].filter(Boolean).join(" - ");
   const labelWithId = [labelBase || "Dispositivo", shortId].filter(Boolean).join(" ");
   return normalizeDeviceLabel(labelWithId || "Mi dispositivo");
 }
