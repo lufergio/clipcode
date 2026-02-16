@@ -3,6 +3,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { QRCodeCanvas } from "qrcode.react";
 import clsx from "clsx";
+import { Space_Grotesk } from "next/font/google";
+
+const spaceGrotesk = Space_Grotesk({
+  subsets: ["latin"],
+  variable: "--font-space-grotesk",
+});
 
 type SendState =
   | { status: "idle" }
@@ -558,7 +564,7 @@ export default function HomePage() {
       });
 
       if (!res.ok) {
-        showToast(data.error ?? "No se pudo crear el pair code.");
+        showToast(data.error ?? "No se pudo crear el código de sincronización.");
         return;
       }
 
@@ -567,12 +573,12 @@ export default function HomePage() {
         expiresIn: Number(data.expiresIn ?? 600),
         createdAt: Date.now(),
       });
-      showToast("Pair code creado");
+      showToast("Código de sincronización creado");
     } catch (error: unknown) {
       debugTrace("pair:create:error", {
         error: error instanceof Error ? error.message : String(error),
       });
-      showToast("No se pudo crear el pair code.");
+      showToast("No se pudo crear el código de sincronización.");
     }
   }
 
@@ -589,7 +595,7 @@ export default function HomePage() {
     if (normalizedPairCode.length !== 6) {
       setPairState({
         status: "error",
-        message: "Ingresa el pair code completo (6 digitos).",
+        message: "Ingresa el código de sincronización completo (6 dígitos).",
       });
       return;
     }
@@ -875,7 +881,7 @@ export default function HomePage() {
       const normalizedPair = normalizeNumericCode(pairFromUrl, 6);
       setTab("send");
       setPairCodeInput(normalizedPair);
-      showToast("Pair code detectado");
+      showToast("Código de sincronización detectado");
       window.history.replaceState(null, "", "/");
       return;
     }
@@ -920,15 +926,31 @@ export default function HomePage() {
   }, [pairingCode]);
 
   return (
-    <main className="min-h-screen bg-neutral-950 text-neutral-50">
-      <div className="mx-auto max-w-3xl px-4 py-8">
+    <main
+      className={clsx(
+        spaceGrotesk.variable,
+        "relative min-h-screen overflow-x-hidden bg-[#06070b] font-[family-name:var(--font-space-grotesk)] text-slate-100"
+      )}
+    >
+      <div className="pointer-events-none absolute inset-0">
+        <div className="absolute -left-20 -top-28 h-72 w-72 rounded-full bg-cyan-500/20 blur-3xl" />
+        <div className="absolute -right-24 top-40 h-80 w-80 rounded-full bg-indigo-500/20 blur-3xl" />
+        <div className="absolute bottom-0 left-1/3 h-72 w-72 rounded-full bg-fuchsia-500/15 blur-3xl" />
+      </div>
+
+      <div className="relative mx-auto max-w-4xl px-4 py-8 sm:px-6 sm:py-10">
         <header className="mb-7">
-          <h1 className="text-3xl font-semibold tracking-tight">ClipCode</h1>
-          <p className="mt-2 text-sm text-neutral-300">
-            Pasa links y texto entre dispositivos con un codigo. Sin cuenta.
+          <div className="inline-flex items-center rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs font-medium text-slate-200 backdrop-blur">
+            Transferencia rapida entre dispositivos
+          </div>
+          <h1 className="mt-3 text-4xl font-semibold tracking-tight text-white sm:text-5xl">
+            ClipCode
+          </h1>
+          <p className="mt-3 max-w-2xl text-sm text-slate-300 sm:text-base">
+            Comparte links y texto entre dispositivos con un codigo. Sin cuenta.
           </p>
-          <div className="mt-4 rounded-xl bg-neutral-900 p-3 ring-1 ring-neutral-800">
-            <label className="mb-2 block text-xs font-medium text-neutral-300">
+          <div className="mt-5 rounded-2xl border border-white/10 bg-white/[0.04] p-4 shadow-2xl shadow-black/20 backdrop-blur">
+            <label className="mb-2 block text-xs font-semibold uppercase tracking-[0.12em] text-slate-300">
               Nombre de este dispositivo
             </label>
             <input
@@ -936,18 +958,18 @@ export default function HomePage() {
               onChange={(event) => setDeviceLabel(normalizeDeviceLabel(event.target.value))}
               onBlur={() => persistDeviceLabel(deviceLabel)}
               placeholder="Ej: TV Sala, iPhone Luis"
-              className="w-full rounded-lg bg-neutral-950 px-3 py-2 text-sm outline-none ring-1 ring-neutral-800 focus:ring-2 focus:ring-neutral-400"
+              className="w-full rounded-xl border border-white/10 bg-[#0e1119] px-3 py-2.5 text-sm outline-none transition focus:border-cyan-300/70 focus:ring-2 focus:ring-cyan-200/20"
             />
           </div>
         </header>
 
-        <div className="mb-6 flex rounded-xl bg-neutral-900 p-1">
+        <div className="mb-6 flex rounded-2xl border border-white/10 bg-white/[0.04] p-1 backdrop-blur">
           <button
             className={clsx(
-              "flex-1 rounded-lg px-4 py-3 text-base font-medium transition",
+              "flex-1 rounded-xl px-4 py-3 text-base font-semibold transition",
               tab === "send"
-                ? "bg-neutral-50 text-neutral-950"
-                : "text-neutral-200 hover:bg-neutral-800"
+                ? "bg-gradient-to-r from-cyan-300 to-blue-300 text-slate-950"
+                : "text-slate-200 hover:bg-white/10"
             )}
             onClick={() => setTab("send")}
           >
@@ -955,10 +977,10 @@ export default function HomePage() {
           </button>
           <button
             className={clsx(
-              "flex-1 rounded-lg px-4 py-3 text-base font-medium transition",
+              "flex-1 rounded-xl px-4 py-3 text-base font-semibold transition",
               tab === "receive"
-                ? "bg-neutral-50 text-neutral-950"
-                : "text-neutral-200 hover:bg-neutral-800"
+                ? "bg-gradient-to-r from-cyan-300 to-blue-300 text-slate-950"
+                : "text-slate-200 hover:bg-white/10"
             )}
             onClick={() => setTab("receive")}
           >
@@ -967,9 +989,9 @@ export default function HomePage() {
         </div>
 
         {tab === "send" && (
-          <section className="rounded-2xl bg-neutral-900 p-5 shadow">
-            <h2 className="text-lg font-semibold">Links</h2>
-            <p className="mt-1 text-sm text-neutral-300">
+          <section className="rounded-3xl border border-white/10 bg-white/[0.04] p-5 shadow-2xl shadow-black/20 backdrop-blur sm:p-6">
+            <h2 className="text-xl font-semibold text-white">Enviar contenido</h2>
+            <p className="mt-1 text-sm text-slate-300">
               Hasta 10 links por envio. Se consume una sola vez al recibir.
             </p>
 
@@ -987,10 +1009,10 @@ export default function HomePage() {
                     }}
                     placeholder={`https://example.com/${index + 1}`}
                     className={clsx(
-                      "w-full rounded-xl bg-neutral-950 px-4 py-3 text-base outline-none ring-1",
+                      "w-full rounded-xl border px-4 py-3 text-base outline-none transition",
                       invalid
-                        ? "ring-red-500 focus:ring-red-400"
-                        : "ring-neutral-800 focus:ring-2 focus:ring-neutral-400"
+                        ? "border-rose-500/90 bg-rose-500/10 focus:ring-2 focus:ring-rose-300/30"
+                        : "border-white/10 bg-[#0d1018] focus:border-cyan-300/70 focus:ring-2 focus:ring-cyan-200/20"
                     )}
                   />
                 );
@@ -1004,14 +1026,14 @@ export default function HomePage() {
                   setLinkInputs((prev) => [...prev, ""]);
                 }}
                 disabled={!canAddLinkInput}
-                className="rounded-xl bg-neutral-800 px-4 py-2 text-sm font-medium text-neutral-100 hover:bg-neutral-700 disabled:opacity-60"
+                className="rounded-xl border border-white/10 bg-white/10 px-4 py-2 text-sm font-medium text-slate-100 transition hover:bg-white/15 disabled:opacity-60"
               >
                 Agregar link
               </button>
 
               <button
                 onClick={() => setShowTextComposer((prev) => !prev)}
-                className="rounded-xl bg-neutral-800 px-4 py-2 text-sm font-medium text-neutral-100 hover:bg-neutral-700"
+                className="rounded-xl border border-white/10 bg-white/10 px-4 py-2 text-sm font-medium text-slate-100 transition hover:bg-white/15"
               >
                 {showTextComposer ? "Ocultar texto" : "Agregar texto"}
               </button>
@@ -1019,14 +1041,14 @@ export default function HomePage() {
 
             {showTextComposer && (
               <div className="mt-4">
-                <label className="mb-2 block text-sm font-medium text-neutral-200">
+                <label className="mb-2 block text-sm font-medium text-slate-200">
                   Texto (opcional)
                 </label>
                 <textarea
                   ref={sendTextareaRef}
                   value={text}
                   onChange={(event) => setText(event.target.value)}
-                  className="h-28 w-full resize-none rounded-xl bg-neutral-950 p-3 text-sm outline-none ring-1 ring-neutral-800 focus:ring-2 focus:ring-neutral-400"
+                  className="h-28 w-full resize-none rounded-xl border border-white/10 bg-[#0d1018] p-3 text-sm outline-none transition focus:border-cyan-300/70 focus:ring-2 focus:ring-cyan-200/20"
                   placeholder="Notas, codigo, instrucciones..."
                 />
               </div>
@@ -1034,13 +1056,13 @@ export default function HomePage() {
 
             <div className="mt-4 grid gap-3 md:grid-cols-2">
               <div>
-                <label className="mb-2 block text-sm font-medium text-neutral-200">
+                <label className="mb-2 block text-sm font-medium text-slate-200">
                   Expiracion
                 </label>
                 <select
                   value={ttlSeconds}
                   onChange={(event) => setTtlSeconds(Number(event.target.value))}
-                  className="w-full rounded-xl bg-neutral-950 px-4 py-3 text-base outline-none ring-1 ring-neutral-800 focus:ring-2 focus:ring-neutral-400"
+                  className="w-full rounded-xl border border-white/10 bg-[#0d1018] px-4 py-3 text-base outline-none transition focus:border-cyan-300/70 focus:ring-2 focus:ring-cyan-200/20"
                 >
                   {TTL_OPTIONS.map((option) => (
                     <option key={option.value} value={option.value}>
@@ -1051,8 +1073,8 @@ export default function HomePage() {
               </div>
 
               <div>
-                <label className="mb-2 block text-sm font-medium text-neutral-200">
-                  Pair code (enviar a dispositivo vinculado)
+                <label className="mb-2 block text-sm font-medium text-slate-200">
+                  Código de sincronización (enviar a dispositivo vinculado)
                 </label>
                 <div className="flex gap-2">
                   <input
@@ -1061,12 +1083,12 @@ export default function HomePage() {
                     inputMode="numeric"
                     pattern="[0-9]*"
                     placeholder="123456"
-                    className="w-full rounded-xl bg-neutral-950 px-4 py-3 text-center text-lg tracking-widest outline-none ring-1 ring-neutral-800 focus:ring-2 focus:ring-neutral-400"
+                    className="w-full rounded-xl border border-white/10 bg-[#0d1018] px-4 py-3 text-center text-lg tracking-widest outline-none transition focus:border-cyan-300/70 focus:ring-2 focus:ring-cyan-200/20"
                   />
                   <button
                     onClick={() => void handleConfirmPair()}
                     disabled={pairState.status === "linking"}
-                    className="rounded-xl bg-neutral-50 px-4 py-2 text-sm font-semibold text-neutral-950 hover:opacity-90 disabled:opacity-60"
+                    className="rounded-xl bg-gradient-to-r from-cyan-300 to-blue-300 px-4 py-2 text-sm font-semibold text-slate-950 transition hover:brightness-110 disabled:opacity-60"
                   >
                     {pairState.status === "linking" ? "Vinculando..." : "Vincular"}
                   </button>
@@ -1075,7 +1097,7 @@ export default function HomePage() {
             </div>
 
             {pairState.status === "linked" && (
-              <div className="mt-3 rounded-xl bg-emerald-950/30 p-3 text-sm text-emerald-200 ring-1 ring-emerald-900">
+              <div className="mt-3 rounded-xl border border-emerald-400/40 bg-emerald-400/10 p-3 text-sm text-emerald-100">
                 <div>
                   Vinculado con{" "}
                   <span className="font-semibold">
@@ -1085,14 +1107,14 @@ export default function HomePage() {
                 </div>
                 <button
                   onClick={handleUnlinkPair}
-                  className="mt-2 rounded-lg bg-emerald-900/70 px-3 py-1 text-xs font-medium text-emerald-100 hover:bg-emerald-900"
+                  className="mt-2 rounded-lg border border-emerald-300/30 bg-emerald-400/20 px-3 py-1 text-xs font-medium text-emerald-100 hover:bg-emerald-400/30"
                 >
                   Desvincular
                 </button>
               </div>
             )}
             {pairState.status === "error" && (
-              <div className="mt-3 rounded-xl bg-red-950/40 p-3 text-sm text-red-200 ring-1 ring-red-900">
+              <div className="mt-3 rounded-xl border border-rose-400/40 bg-rose-400/10 p-3 text-sm text-rose-100">
                 {pairState.message}
               </div>
             )}
@@ -1101,7 +1123,7 @@ export default function HomePage() {
               <button
                 onClick={() => void handleGenerate()}
                 disabled={sendState.status === "loading"}
-                className="rounded-xl bg-neutral-50 px-5 py-3 text-base font-semibold text-neutral-950 hover:opacity-90 disabled:opacity-60"
+                className="rounded-xl bg-gradient-to-r from-cyan-300 via-sky-300 to-blue-300 px-5 py-3 text-base font-semibold text-slate-950 shadow-lg shadow-cyan-500/20 transition hover:brightness-110 disabled:opacity-60"
               >
                 {sendState.status === "loading" ? "Enviando..." : "Enviar"}
               </button>
@@ -1113,37 +1135,37 @@ export default function HomePage() {
                   setShowTextComposer(false);
                   setSendState({ status: "idle" });
                 }}
-                className="rounded-xl bg-neutral-800 px-5 py-3 text-base font-medium text-neutral-100 hover:bg-neutral-700"
+                className="rounded-xl border border-white/10 bg-white/10 px-5 py-3 text-base font-medium text-slate-100 transition hover:bg-white/15"
               >
                 Nuevo
               </button>
             </div>
 
-            <div className="mt-2 text-xs text-neutral-400">
+            <div className="mt-2 text-xs text-slate-400">
               {cleanedLinks.length} links listos / {MAX_LINKS}
             </div>
 
             {sendState.status === "error" && (
-              <div className="mt-4 rounded-xl bg-red-950/40 p-3 text-sm text-red-200 ring-1 ring-red-900">
+              <div className="mt-4 rounded-xl border border-rose-400/40 bg-rose-400/10 p-3 text-sm text-rose-100">
                 {sendState.message}
               </div>
             )}
 
             {sendState.status === "success" && (
-              <div className="mt-6 rounded-2xl bg-neutral-950 p-4 ring-1 ring-neutral-800">
+              <div className="mt-6 rounded-2xl border border-white/10 bg-[#0b0f17] p-4">
                 <div className="flex flex-col items-center gap-3">
                   <div className="text-5xl font-bold tracking-widest">{sendState.code}</div>
-                  <div className="text-sm text-neutral-300">Expira en: {expiresLabel}</div>
+                  <div className="text-sm text-slate-300">Expira en: {expiresLabel}</div>
 
                   <div className="flex flex-wrap justify-center gap-2">
                     <button
-                      className="rounded-xl bg-neutral-50 px-4 py-2 text-sm font-medium text-neutral-950"
+                      className="rounded-xl bg-gradient-to-r from-cyan-300 to-blue-300 px-4 py-2 text-sm font-semibold text-slate-950"
                       onClick={() => void copyToClipboard(sendState.code)}
                     >
                       Copiar codigo
                     </button>
                     <button
-                      className="rounded-xl bg-neutral-800 px-4 py-2 text-sm font-medium text-neutral-100"
+                      className="rounded-xl border border-white/10 bg-white/10 px-4 py-2 text-sm font-medium text-slate-100 hover:bg-white/15"
                       onClick={() => void copyToClipboard(shareLink)}
                     >
                       Copiar link
@@ -1160,37 +1182,37 @@ export default function HomePage() {
         )}
 
         {tab === "receive" && (
-          <section className="rounded-2xl bg-neutral-900 p-5 shadow">
-            <h2 className="text-lg font-semibold">Recibir</h2>
-            <p className="mt-1 text-sm text-neutral-300">
+          <section className="rounded-3xl border border-white/10 bg-white/[0.04] p-5 shadow-2xl shadow-black/20 backdrop-blur sm:p-6">
+            <h2 className="text-xl font-semibold text-white">Recibir contenido</h2>
+            <p className="mt-1 text-sm text-slate-300">
               Puedes usar codigo manual o Buscar cerca con pairing.
             </p>
 
             <div className="mt-4 grid gap-3 md:grid-cols-2">
               <button
                 onClick={() => void handleCreatePairCode()}
-                className="rounded-xl bg-neutral-50 px-5 py-3 text-base font-semibold text-neutral-950 hover:opacity-90"
+                className="rounded-xl bg-gradient-to-r from-cyan-300 to-blue-300 px-5 py-3 text-base font-semibold text-slate-950 transition hover:brightness-110"
               >
                 Vincular con código
               </button>
               <button
                 onClick={() => void handleNearbySearch()}
                 disabled={nearbyState.status === "searching"}
-                className="rounded-xl bg-blue-600 px-5 py-3 text-base font-semibold text-white hover:bg-blue-500 disabled:opacity-60"
+                className="rounded-xl border border-cyan-300/30 bg-cyan-400/20 px-5 py-3 text-base font-semibold text-cyan-100 transition hover:bg-cyan-400/30 disabled:opacity-60"
               >
                 {nearbyState.status === "searching" ? "Buscando..." : "Buscar cerca"}
               </button>
             </div>
 
             {pairingCode && (
-              <div className="mt-4 rounded-2xl bg-neutral-950 p-4 ring-1 ring-neutral-800">
+              <div className="mt-4 rounded-2xl border border-white/10 bg-[#0b0f17] p-4">
                 <div className="flex flex-col items-center gap-3">
-                  <div className="text-sm text-neutral-300">Pair code</div>
+                  <div className="text-sm text-slate-300">Código de sincronización</div>
                   <div className="text-4xl font-bold tracking-widest">{pairingCode.code}</div>
-                  <div className="text-xs text-neutral-400">
+                  <div className="text-xs text-slate-400">
                     Dispositivo: {deviceLabel || "Mi dispositivo"}
                   </div>
-                  <div className="text-xs text-neutral-400">
+                  <div className="text-xs text-slate-400">
                     Expira en {Math.ceil(pairingCode.expiresIn / 60)} min
                   </div>
                   <div className="rounded-2xl bg-white p-3">
@@ -1198,33 +1220,33 @@ export default function HomePage() {
                   </div>
                   <button
                     onClick={() => void copyToClipboard(pairingCode.code)}
-                    className="rounded-xl bg-neutral-50 px-4 py-2 text-sm font-medium text-neutral-950"
+                    className="rounded-xl bg-gradient-to-r from-cyan-300 to-blue-300 px-4 py-2 text-sm font-semibold text-slate-950"
                   >
-                    Copiar pair code
+                    Copiar código de sincronización
                   </button>
                 </div>
               </div>
             )}
 
             {nearbyState.status === "empty" && (
-              <div className="mt-4 rounded-xl bg-amber-950/30 p-3 text-sm text-amber-200 ring-1 ring-amber-900">
+              <div className="mt-4 rounded-xl border border-amber-300/40 bg-amber-300/10 p-3 text-sm text-amber-100">
                 No se encontro nada. Verifica que hayas enviado a este dispositivo o escribe
                 el codigo manual.
               </div>
             )}
             {nearbyState.status === "error" && (
-              <div className="mt-4 rounded-xl bg-red-950/40 p-3 text-sm text-red-200 ring-1 ring-red-900">
+              <div className="mt-4 rounded-xl border border-rose-400/40 bg-rose-400/10 p-3 text-sm text-rose-100">
                 {nearbyState.message}
               </div>
             )}
 
-            <div className="mt-6 rounded-xl bg-neutral-950 p-4 ring-1 ring-neutral-800">
-              <h3 className="text-sm font-semibold text-neutral-200">Modo manual por codigo</h3>
+            <div className="mt-6 rounded-xl border border-white/10 bg-[#0b0f17] p-4">
+              <h3 className="text-sm font-semibold text-slate-200">Modo manual por codigo</h3>
               <input
                 ref={receiveInputRef}
                 value={codeInput}
                 onChange={(event) => onCodeChange(event.target.value)}
-                className="mt-3 w-full rounded-xl bg-neutral-900 p-3 text-center text-2xl tracking-widest outline-none ring-1 ring-neutral-800 focus:ring-2 focus:ring-neutral-400"
+                className="mt-3 w-full rounded-xl border border-white/10 bg-[#101522] p-3 text-center text-2xl tracking-widest outline-none transition focus:border-cyan-300/70 focus:ring-2 focus:ring-cyan-200/20"
                 placeholder="12345"
                 inputMode="numeric"
                 pattern="[0-9]*"
@@ -1233,7 +1255,7 @@ export default function HomePage() {
                 <button
                   onClick={() => void handleFetch()}
                   disabled={receiveState.status === "loading"}
-                  className="rounded-xl bg-neutral-50 px-4 py-2 text-sm font-semibold text-neutral-950 hover:opacity-90 disabled:opacity-60"
+                  className="rounded-xl bg-gradient-to-r from-cyan-300 to-blue-300 px-4 py-2 text-sm font-semibold text-slate-950 transition hover:brightness-110 disabled:opacity-60"
                 >
                   {receiveState.status === "loading" ? "Buscando..." : "Recibir"}
                 </button>
@@ -1242,7 +1264,7 @@ export default function HomePage() {
                     setCodeInput("");
                     setReceiveState({ status: "idle" });
                   }}
-                  className="rounded-xl bg-neutral-800 px-4 py-2 text-sm font-medium text-neutral-100 hover:bg-neutral-700"
+                  className="rounded-xl border border-white/10 bg-white/10 px-4 py-2 text-sm font-medium text-slate-100 transition hover:bg-white/15"
                 >
                   Limpiar
                 </button>
@@ -1250,20 +1272,20 @@ export default function HomePage() {
             </div>
 
             {receiveState.status === "error" && (
-              <div className="mt-4 rounded-xl bg-red-950/40 p-3 text-sm text-red-200 ring-1 ring-red-900">
+              <div className="mt-4 rounded-xl border border-rose-400/40 bg-rose-400/10 p-3 text-sm text-rose-100">
                 {receiveState.message}
               </div>
             )}
 
             {receiveState.status === "success" && (
-              <div className="mt-6 rounded-2xl bg-neutral-950 p-4 ring-1 ring-neutral-800">
-                <div className="mb-3 text-sm text-neutral-300">
-                  Codigo: <span className="font-semibold text-neutral-50">{receiveState.code}</span>
+              <div className="mt-6 rounded-2xl border border-white/10 bg-[#0b0f17] p-4">
+                <div className="mb-3 text-sm text-slate-300">
+                  Codigo: <span className="font-semibold text-slate-100">{receiveState.code}</span>
                 </div>
                 {receiveState.sourceDeviceLabel && (
-                  <div className="mb-3 text-sm text-neutral-300">
+                  <div className="mb-3 text-sm text-slate-300">
                     Enviado desde:{" "}
-                    <span className="font-semibold text-neutral-50">
+                    <span className="font-semibold text-slate-100">
                       {receiveState.sourceDeviceLabel}
                     </span>
                   </div>
@@ -1274,21 +1296,21 @@ export default function HomePage() {
                     {receiveState.links.map((link, index) => (
                       <div
                         key={`${link}-${index}`}
-                        className="rounded-xl bg-neutral-900 p-3 ring-1 ring-neutral-800"
+                        className="rounded-xl border border-white/10 bg-[#101522] p-3"
                       >
-                        <div className="text-sm text-neutral-200">{shortenLink(link)}</div>
+                        <div className="text-sm text-slate-200">{shortenLink(link)}</div>
                         <div className="mt-3 flex flex-wrap gap-2">
                           <a
                             href={link}
                             target="_blank"
                             rel="noopener noreferrer"
-                            className="rounded-xl bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500"
+                            className="rounded-xl border border-cyan-300/30 bg-cyan-400/20 px-4 py-2 text-sm font-medium text-cyan-100 transition hover:bg-cyan-400/30"
                           >
                             Abrir
                           </a>
                           <button
                             onClick={() => void copyToClipboard(link)}
-                            className="rounded-xl bg-neutral-50 px-4 py-2 text-sm font-medium text-neutral-950"
+                            className="rounded-xl bg-gradient-to-r from-cyan-300 to-blue-300 px-4 py-2 text-sm font-semibold text-slate-950"
                           >
                             Copiar
                           </button>
@@ -1299,22 +1321,22 @@ export default function HomePage() {
                 )}
 
                 {receiveState.text && (
-                  <div className="mt-4 rounded-xl bg-neutral-900 p-3 ring-1 ring-neutral-800">
+                  <div className="mt-4 rounded-xl border border-white/10 bg-[#101522] p-3">
                     <button
                       onClick={() => setReceiveTextOpen((prev) => !prev)}
-                      className="w-full rounded-lg bg-neutral-800 px-3 py-2 text-left text-sm font-medium text-neutral-100 hover:bg-neutral-700"
+                      className="w-full rounded-lg border border-white/10 bg-white/10 px-3 py-2 text-left text-sm font-medium text-slate-100 transition hover:bg-white/15"
                     >
                       {receiveTextOpen ? "Ocultar texto" : "Mostrar texto"}
                     </button>
 
                     {receiveTextOpen && (
-                      <pre className="mt-3 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-xl bg-neutral-950 p-3 text-sm text-neutral-100 ring-1 ring-neutral-800">
+                      <pre className="mt-3 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-xl border border-white/10 bg-[#0b0f17] p-3 text-sm text-slate-100">
                         {receiveState.text}
                       </pre>
                     )}
 
                     <button
-                      className="mt-3 rounded-xl bg-neutral-50 px-4 py-2 text-sm font-medium text-neutral-950"
+                      className="mt-3 rounded-xl bg-gradient-to-r from-cyan-300 to-blue-300 px-4 py-2 text-sm font-semibold text-slate-950"
                       onClick={() => void copyToClipboard(receiveState.text ?? "")}
                     >
                       Copiar texto
@@ -1326,16 +1348,17 @@ export default function HomePage() {
           </section>
         )}
 
-        <footer className="mt-8 text-center text-xs text-neutral-500">
+        <footer className="mt-8 text-center text-xs text-slate-500">
           ClipCode | MVP PRO | Sin cuentas | Expira automatico
         </footer>
       </div>
 
       {toast && (
-        <div className="fixed bottom-6 left-1/2 z-50 -translate-x-1/2 rounded-2xl bg-neutral-900 px-4 py-2 text-sm text-neutral-100 shadow-lg ring-1 ring-neutral-700">
+        <div className="fixed bottom-6 left-1/2 z-50 -translate-x-1/2 rounded-2xl border border-white/15 bg-[#0d111a]/95 px-4 py-2 text-sm text-slate-100 shadow-lg shadow-black/40 backdrop-blur">
           {toast}
         </div>
       )}
     </main>
   );
 }
+
