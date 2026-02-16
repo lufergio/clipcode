@@ -252,6 +252,7 @@ export default function HomePage() {
   const [deviceId, setDeviceId] = useState("");
   const [deviceLabel, setDeviceLabel] = useState("");
   const [showApkDownloadButton, setShowApkDownloadButton] = useState(false);
+  const [pendingAutoPairCode, setPendingAutoPairCode] = useState<string | null>(null);
 
   const [toast, setToast] = useState<string | null>(null);
   const toastTimerRef = useRef<number | null>(null);
@@ -672,7 +673,7 @@ export default function HomePage() {
     }
   }
 
-  async function handleConfirmPair() {
+  async function handleConfirmPair(pairCodeOverride?: string) {
     if (!deviceId) {
       setPairState({
         status: "error",
@@ -681,7 +682,10 @@ export default function HomePage() {
       return;
     }
 
-    const normalizedPairCode = normalizeNumericCode(pairCodeInput, 6);
+    const normalizedPairCode = normalizeNumericCode(
+      pairCodeOverride ?? pairCodeInput,
+      6
+    );
     if (normalizedPairCode.length !== 6) {
       setPairState({
         status: "error",
@@ -971,7 +975,12 @@ export default function HomePage() {
       const normalizedPair = normalizeNumericCode(pairFromUrl, 6);
       setTab("send");
       setPairCodeInput(normalizedPair);
-      showToast("Código de sincronización detectado");
+      if (normalizedPair.length === 6) {
+        setPendingAutoPairCode(normalizedPair);
+        showToast("Código detectado. Vinculando...");
+      } else {
+        showToast("Código de sincronización detectado");
+      }
       window.history.replaceState(null, "", "/");
       return;
     }
@@ -993,6 +1002,13 @@ export default function HomePage() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (!pendingAutoPairCode || !deviceId) return;
+    void handleConfirmPair(pendingAutoPairCode);
+    setPendingAutoPairCode(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingAutoPairCode, deviceId]);
 
   useEffect(() => {
     return () => {
