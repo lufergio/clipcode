@@ -51,6 +51,9 @@ export default function HomePage() {
   const sendTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const receiveInputRef = useRef<HTMLInputElement | null>(null);
 
+  // Evita doble auto-proceso (React StrictMode / rerenders)
+  const didAutoProcessRef = useRef(false);
+
   /**
    * Muestra un toast flotante por unos segundos.
    */
@@ -142,22 +145,6 @@ export default function HomePage() {
     }
   }
 
-  // Auto-cargar código desde query (?code=ABCD)
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-
-    const params = new URLSearchParams(window.location.search);
-    const codeFromUrl = params.get("code");
-
-    if (codeFromUrl) {
-      const normalized = codeFromUrl.toUpperCase().slice(0, 4);
-      setTab("receive");
-      setCodeInput(normalized);
-      handleFetch(normalized);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
   /**
    * Copiar al portapapeles con toast (sin alert).
    */
@@ -173,9 +160,13 @@ export default function HomePage() {
   /**
    * POST /api/share
    * Envía el texto al backend y recibe un código.
+   *
+   * - textOverride: usado para casos donde el texto llega por query (?text=...)
+   *   o por Share Sheet desde Android.
    */
-  async function handleGenerate() {
-    const clean = text.trim();
+  async function handleGenerate(textOverride?: string) {
+    const clean = String(textOverride ?? text).trim();
+
     if (!clean) {
       setSendState({
         status: "error",
@@ -202,6 +193,9 @@ export default function HomePage() {
         });
         return;
       }
+
+      // Si venía de share/query, reflejamos el texto en el textarea.
+      setText(clean);
 
       setSendState({
         status: "success",
@@ -235,9 +229,69 @@ export default function HomePage() {
     }
   }
 
+  /**
+   * Auto-detección por query:
+   * 1) Recibir:  ?code=ABCD
+   * 2) Compartir / share_target / TWA: ?title=...&text=...&url=...&auto=1
+   *
+   * Reglas:
+   * - Si viene "code", manda a RECIBIR.
+   * - Si NO viene "code" pero viene title/text/url, manda a ENVIAR y precarga textarea.
+   * - Si auto=1 => genera el código automáticamente.
+   * - Limpia la URL para evitar duplicados al refrescar.
+   */
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (didAutoProcessRef.current) return;
+
+    const params = new URLSearchParams(window.location.search);
+
+    // 1) Prioridad: recibir por link ?code=ABCD
+    const codeFromUrl = params.get("code");
+    if (codeFromUrl) {
+      didAutoProcessRef.current = true;
+
+      const normalized = codeFromUrl.toUpperCase().slice(0, 4);
+      setTab("receive");
+      setCodeInput(normalized);
+      handleFetch(normalized);
+
+      // Limpia URL
+      window.history.replaceState(null, "", "/");
+      return;
+    }
+
+    // 2) Compartir: title/text/url (+ auto=1)
+    const sharedTitle = (params.get("title") ?? "").trim();
+    const sharedText = (params.get("text") ?? "").trim();
+    const sharedUrl = (params.get("url") ?? "").trim();
+    const auto = (params.get("auto") ?? "").trim(); // "1" recomendado
+
+    if (sharedTitle || sharedText || sharedUrl) {
+      didAutoProcessRef.current = true;
+
+      const payload = [sharedTitle, sharedText, sharedUrl]
+        .filter(Boolean)
+        .join("\n")
+        .trim();
+
+      setTab("send");
+      setText(payload);
+      showToast("Contenido recibido ✅");
+
+      // Si auto=1, generamos de una.
+      if (auto === "1") {
+        void handleGenerate(payload);
+      }
+
+      // Limpia URL
+      window.history.replaceState(null, "", "/");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const shareLink = useMemo(() => {
     if (sendState.status !== "success") return "";
-    // Link simple que abre la web; (luego puedes agregar auto-prefill via query)
     return `${window.location.origin}/?code=${sendState.code}`;
   }, [sendState]);
 
@@ -307,7 +361,7 @@ export default function HomePage() {
 
             <div className="mt-4 flex gap-3">
               <button
-                onClick={handleGenerate}
+                onClick={() => handleGenerate()}
                 disabled={sendState.status === "loading"}
                 className="rounded-xl bg-neutral-50 px-4 py-2 text-sm font-medium text-neutral-950 hover:opacity-90 disabled:opacity-60"
               >
@@ -357,10 +411,7 @@ export default function HomePage() {
                   </div>
 
                   <div className="rounded-2xl bg-white p-3">
-                    <QRCodeCanvas
-                      value={shareLink || sendState.code}
-                      size={180}
-                    />
+                    <QRCodeCanvas value={shareLink || sendState.code} size={180} />
                   </div>
 
                   <p className="text-xs text-neutral-400">
