@@ -25,6 +25,24 @@ function isAndroidDevice(): boolean {
   return /android/i.test(navigator.userAgent);
 }
 
+function isInAppContext(): boolean {
+  if (typeof navigator === "undefined" || typeof document === "undefined") return false;
+  const ua = navigator.userAgent.toLowerCase();
+  const isAndroidWebView =
+    /\bwv\b/.test(ua) ||
+    (ua.includes("android") &&
+      ua.includes("version/4.0") &&
+      ua.includes("chrome/") &&
+      ua.includes("mobile safari/"));
+  const isInAppBrowser =
+    ua.includes("fb_iab") ||
+    ua.includes("instagram") ||
+    ua.includes("line/") ||
+    ua.includes("micromessenger");
+  const cameFromAndroidApp = document.referrer.startsWith("android-app://");
+  return isAndroidWebView || isInAppBrowser || cameFromAndroidApp;
+}
+
 function buildAndroidIntentUrl(pairCode: string, fallbackUrl: string): string {
   const scheme = process.env.NEXT_PUBLIC_APP_SCHEME || "clipcode";
   const packageName = process.env.NEXT_PUBLIC_ANDROID_APP_PACKAGE;
@@ -67,6 +85,12 @@ export default function OpenPairClient() {
       window.location.replace("/");
       return;
     }
+
+    if (isInAppContext()) {
+      window.location.replace(fallbackUrl);
+      return;
+    }
+
     if (!autoOpenRequested) {
       return;
     }
