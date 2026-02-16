@@ -3,6 +3,9 @@
 import { useEffect, useMemo } from "react";
 import { useSearchParams } from "next/navigation";
 
+const AUTO_OPEN_COOLDOWN_MS = 15_000;
+const AUTO_OPEN_STORAGE_PREFIX = "clipcode:auto-open-pair:";
+
 function normalizePairCode(value: string | null): string {
   return String(value ?? "").replace(/\D/g, "").slice(0, 6);
 }
@@ -33,10 +36,13 @@ function buildAndroidIntentUrl(pairCode: string, fallbackUrl: string): string {
 export default function OpenPairClient() {
   const params = useSearchParams();
   const pairCode = normalizePairCode(params.get("pair"));
+  const autoOpenRequested = ["1", "true", "yes"].includes(
+    String(params.get("auto") ?? "").toLowerCase()
+  );
 
   const fallbackUrl = useMemo(() => {
     if (!pairCode) return "/";
-    return `/?pair=${pairCode}`;
+    return `/?pair=${pairCode}&fromApp=1`;
   }, [pairCode]);
 
   const deepLinkUrl = useMemo(() => {
@@ -61,6 +67,19 @@ export default function OpenPairClient() {
       window.location.replace("/");
       return;
     }
+    if (!autoOpenRequested) {
+      return;
+    }
+
+    const storageKey = `${AUTO_OPEN_STORAGE_PREFIX}${pairCode}`;
+    const lastAutoOpenAt = Number(localStorage.getItem(storageKey) ?? "0");
+    const now = Date.now();
+    if (now - lastAutoOpenAt < AUTO_OPEN_COOLDOWN_MS) {
+      return;
+    }
+    localStorage.setItem(storageKey, String(now));
+    // Evita bucles por recarga/reapertura: removemos el flag auto tras el primer intento.
+    window.history.replaceState(null, "", `/open?pair=${pairCode}`);
 
     let hidden = false;
     const onVisibilityChange = () => {
@@ -80,7 +99,7 @@ export default function OpenPairClient() {
       window.clearTimeout(timer);
       document.removeEventListener("visibilitychange", onVisibilityChange);
     };
-  }, [fallbackUrl, pairCode, preferredOpenUrl]);
+  }, [autoOpenRequested, fallbackUrl, pairCode, preferredOpenUrl]);
 
   return (
     <main className="min-h-screen bg-neutral-950 px-4 py-10 text-neutral-50">

@@ -1011,8 +1011,8 @@ export default function HomePage() {
 
   const pairLink = useMemo(() => {
     if (!pairingCode) return "";
-    if (typeof window === "undefined") return `/open?pair=${pairingCode.code}`;
-    return `${window.location.origin}/open?pair=${pairingCode.code}`;
+    if (typeof window === "undefined") return `/open?pair=${pairingCode.code}&auto=1`;
+    return `${window.location.origin}/open?pair=${pairingCode.code}&auto=1`;
   }, [pairingCode]);
 
   return (
