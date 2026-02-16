@@ -1003,7 +1003,7 @@ export default function HomePage() {
             Transferencia rapida entre dispositivos
           </div>
           <h1 className="mt-3 text-center text-4xl font-semibold tracking-tight text-white sm:text-5xl">
-            ClipCode
+            ClipEc
           </h1>
           <p className="mt-3 max-w-2xl text-sm text-slate-300 sm:text-base">
             Comparte links y texto entre dispositivos con un codigo. Sin cuenta.
@@ -1408,7 +1408,7 @@ export default function HomePage() {
         )}
 
         <footer className="mt-8 text-center text-xs text-slate-500">
-          ClipCode | MVP PRO | Sin cuentas | Expira automatico
+          ClipEc | MVP PRO | Sin cuentas | Expira automatico
         </footer>
       </div>
 
