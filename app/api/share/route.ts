@@ -54,6 +54,8 @@ type ShareRequestBody = {
   text?: unknown;
   ttlSeconds?: unknown;
   senderDeviceId?: unknown;
+  senderDeviceLabel?: unknown;
+  roomCode?: unknown;
 };
 
 type StoredClipPayload = {
@@ -67,6 +69,19 @@ type SenderPairPayload = {
   receiverDeviceId: string;
   receiverDeviceLabel?: string;
   senderDeviceLabel?: string;
+};
+
+type RoomMember = {
+  deviceId: string;
+  deviceLabel?: string;
+  joinedAt?: number;
+};
+
+type RoomPayload = {
+  hostDeviceId: string;
+  hostDeviceLabel?: string;
+  createdAt?: number;
+  members?: RoomMember[];
 };
 
 type NearbyPayload = {
@@ -92,6 +107,36 @@ function normalizeDeviceId(value: unknown): string {
   if (!normalized) return "";
   if (!/^[a-zA-Z0-9_-]{8,64}$/.test(normalized)) return "";
   return normalized;
+}
+
+function normalizeDeviceLabel(value: unknown): string {
+  return String(value ?? "").trim().slice(0, 40);
+}
+
+function normalizeRoomCode(value: unknown): string {
+  return String(value ?? "")
+    .trim()
+    .replace(/\D/g, "")
+    .slice(0, 6);
+}
+
+function normalizeRoomMembers(input: unknown): RoomMember[] {
+  if (!Array.isArray(input)) return [];
+  const dedupe = new Map<string, RoomMember>();
+
+  for (const item of input) {
+    const deviceId = normalizeDeviceId((item as RoomMember | undefined)?.deviceId);
+    if (!deviceId) continue;
+    const deviceLabel = normalizeDeviceLabel((item as RoomMember | undefined)?.deviceLabel);
+    const joinedAt = Number((item as RoomMember | undefined)?.joinedAt);
+    dedupe.set(deviceId, {
+      deviceId,
+      deviceLabel: deviceLabel || undefined,
+      joinedAt: Number.isFinite(joinedAt) && joinedAt > 0 ? joinedAt : undefined,
+    });
+  }
+
+  return [...dedupe.values()];
 }
 
 function createMessageId(): string {
@@ -139,11 +184,15 @@ export async function POST(req: Request) {
       ? ttlCandidate
       : DEFAULT_TTL_SECONDS;
     const senderDeviceId = normalizeDeviceId(body?.senderDeviceId);
+    const senderDeviceLabel = normalizeDeviceLabel(body?.senderDeviceLabel);
+    const roomCode = normalizeRoomCode(body?.roomCode);
     debugTrace("request", {
       linksCount: links.length,
       hasText: Boolean(text),
       ttlSeconds,
       senderDeviceId: senderDeviceId || null,
+      hasSenderDeviceLabel: Boolean(senderDeviceLabel),
+      roomCode: roomCode || null,
     });
 
     if (links.length > MAX_LINKS) {
@@ -213,8 +262,18 @@ export async function POST(req: Request) {
     });
 
     let nearbyQueued = false;
-    let nearbyReason: "queued" | "not_paired" | "invalid_pair_payload" | "no_sender_device" =
-      "no_sender_device";
+    let nearbyReason:
+      | "queued"
+      | "not_paired"
+      | "invalid_pair_payload"
+      | "no_sender_device"
+      | "room_not_found"
+      | "room_empty" = "no_sender_device";
+    let pairingReceiverFound = false;
+    let roomReceiverFound = false;
+    let roomMatched = false;
+    const nearbyTargetIds = new Set<string>();
+    let resolvedSenderLabel = senderDeviceLabel;
 
     // Si el emisor esta emparejado, publica ultimo item en la bandeja del receptor.
     if (senderDeviceId) {
@@ -227,46 +286,29 @@ export async function POST(req: Request) {
       });
 
       let receiverDeviceId = "";
-      let senderDeviceLabel = "";
       if (typeof rawSenderPairPayload === "string") {
         try {
           const parsed = JSON.parse(rawSenderPairPayload) as SenderPairPayload;
           receiverDeviceId = normalizeDeviceId(parsed?.receiverDeviceId);
-          senderDeviceLabel = String(parsed?.senderDeviceLabel ?? "").trim().slice(0, 40);
+          const payloadSenderLabel = normalizeDeviceLabel(parsed?.senderDeviceLabel);
+          if (!resolvedSenderLabel && payloadSenderLabel) {
+            resolvedSenderLabel = payloadSenderLabel;
+          }
         } catch {
           // Compatibilidad con formato legado (string = receiverDeviceId)
           receiverDeviceId = normalizeDeviceId(rawSenderPairPayload);
         }
       } else {
         receiverDeviceId = normalizeDeviceId(rawSenderPairPayload?.receiverDeviceId);
-        senderDeviceLabel = String(rawSenderPairPayload?.senderDeviceLabel ?? "")
-          .trim()
-          .slice(0, 40);
+        const payloadSenderLabel = normalizeDeviceLabel(rawSenderPairPayload?.senderDeviceLabel);
+        if (!resolvedSenderLabel && payloadSenderLabel) {
+          resolvedSenderLabel = payloadSenderLabel;
+        }
       }
 
       if (receiverDeviceId) {
-        const nearbyPayload: NearbyPayload = {
-          messageId: createMessageId(),
-          code,
-          links,
-          text: text || undefined,
-          senderDeviceLabel: senderDeviceLabel || undefined,
-          createdAt: Date.now(),
-        };
-        await redis.set(
-          `clipcode:nearby:${receiverDeviceId}`,
-          JSON.stringify(nearbyPayload),
-          { ex: ttlSeconds }
-        );
-        nearbyQueued = true;
-        nearbyReason = "queued";
-        debugTrace("nearby:stored", {
-          senderDeviceId,
-          receiverDeviceId,
-          code,
-          ttlSeconds,
-          messageId: nearbyPayload.messageId,
-        });
+        nearbyTargetIds.add(receiverDeviceId);
+        pairingReceiverFound = true;
 
         // Refresca vigencia del pairing activo.
         await redis.expire(
@@ -284,11 +326,79 @@ export async function POST(req: Request) {
       nearbyReason = "no_sender_device";
     }
 
+    if (senderDeviceId && roomCode) {
+      const roomKey = `clipcode:room:${roomCode}`;
+      const rawRoomPayload = await redis.get<string | RoomPayload>(roomKey);
+      roomMatched = Boolean(rawRoomPayload);
+
+      if (rawRoomPayload) {
+        let roomPayload: RoomPayload | null = null;
+        if (typeof rawRoomPayload === "string") {
+          try {
+            roomPayload = JSON.parse(rawRoomPayload) as RoomPayload;
+          } catch {
+            roomPayload = null;
+          }
+        } else {
+          roomPayload = rawRoomPayload;
+        }
+
+        const members = normalizeRoomMembers(roomPayload?.members);
+        const targetMembers = members.filter((member) => member.deviceId !== senderDeviceId);
+        for (const member of targetMembers) {
+          nearbyTargetIds.add(member.deviceId);
+        }
+        roomReceiverFound = targetMembers.length > 0;
+      }
+    }
+
+    if (nearbyTargetIds.size > 0) {
+      for (const receiverDeviceId of nearbyTargetIds) {
+        const nearbyPayload: NearbyPayload = {
+          messageId: createMessageId(),
+          code,
+          links,
+          text: text || undefined,
+          senderDeviceLabel: resolvedSenderLabel || undefined,
+          createdAt: Date.now(),
+        };
+        await redis.set(
+          `clipcode:nearby:${receiverDeviceId}`,
+          JSON.stringify(nearbyPayload),
+          { ex: ttlSeconds }
+        );
+        debugTrace("nearby:stored", {
+          senderDeviceId,
+          receiverDeviceId,
+          code,
+          ttlSeconds,
+          messageId: nearbyPayload.messageId,
+        });
+      }
+      nearbyQueued = true;
+      nearbyReason = "queued";
+    }
+
     if (senderDeviceId && nearbyReason === "no_sender_device") {
       nearbyReason = "not_paired";
     }
 
-    if (senderDeviceId && !nearbyQueued && nearbyReason !== "invalid_pair_payload") {
+    if (!nearbyQueued && senderDeviceId && roomCode) {
+      if (!roomMatched) {
+        nearbyReason = "room_not_found";
+      } else if (!roomReceiverFound) {
+        nearbyReason = "room_empty";
+      } else if (!pairingReceiverFound && nearbyReason !== "invalid_pair_payload") {
+        nearbyReason = "not_paired";
+      }
+    }
+
+    if (
+      senderDeviceId &&
+      !nearbyQueued &&
+      !roomCode &&
+      nearbyReason !== "invalid_pair_payload"
+    ) {
       nearbyReason = "not_paired";
     }
 
@@ -297,6 +407,7 @@ export async function POST(req: Request) {
       expiresIn: ttlSeconds,
       nearbyQueued,
       nearbyReason,
+      nearbyTargets: nearbyTargetIds.size,
     });
   } catch (error: unknown) {
     // ✅ Rate limit error
