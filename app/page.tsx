@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { QRCodeCanvas } from "qrcode.react";
@@ -105,14 +105,24 @@ function createDeviceId(): string {
 function inferPlatformName(): string {
   if (typeof navigator === "undefined") return "";
   const uaData = (
-    navigator as Navigator & { userAgentData?: { platform?: string; mobile?: boolean } }
+    navigator as Navigator & {
+      userAgentData?: { platform?: string; mobile?: boolean };
+    }
   ).userAgentData;
   const platformRaw = String(uaData?.platform ?? navigator.platform ?? "").toLowerCase();
   const userAgent = navigator.userAgent.toLowerCase();
 
   if (platformRaw.includes("iphone") || userAgent.includes("iphone")) return "iPhone";
   if (platformRaw.includes("ipad") || userAgent.includes("ipad")) return "iPad";
+  if (
+    userAgent.includes("macintosh") &&
+    typeof navigator.maxTouchPoints === "number" &&
+    navigator.maxTouchPoints > 1
+  ) {
+    return "iPad";
+  }
   if (platformRaw.includes("android") || userAgent.includes("android")) return "Android";
+  if (userAgent.includes("cros")) return "ChromeOS";
   if (platformRaw.includes("mac")) return "Mac";
   if (platformRaw.includes("win")) return "Windows";
   if (platformRaw.includes("linux")) return "Linux";
@@ -122,13 +132,30 @@ function inferPlatformName(): string {
 
 function inferBrowserName(): string {
   if (typeof navigator === "undefined") return "";
+  const uaData = (
+    navigator as Navigator & {
+      userAgentData?: { brands?: Array<{ brand?: string; version?: string }> };
+    }
+  ).userAgentData;
+  const brands = (uaData?.brands ?? [])
+    .map((entry) => String(entry?.brand ?? "").toLowerCase())
+    .filter(Boolean);
   const ua = navigator.userAgent.toLowerCase();
 
+  if (brands.some((brand) => brand.includes("edge"))) return "Edge";
+  if (brands.some((brand) => brand.includes("opera"))) return "Opera";
+  if (brands.some((brand) => brand.includes("firefox"))) return "Firefox";
+  if (brands.some((brand) => brand.includes("safari"))) return "Safari";
+  if (brands.some((brand) => brand.includes("chrome"))) return "Chrome";
+
+  if (ua.includes("edgios/") || ua.includes("edg/")) return "Edge";
+  if (ua.includes("opt/") || ua.includes("opr/") || ua.includes("opera")) return "Opera";
+  if (ua.includes("firefox/") || ua.includes("fxios/")) return "Firefox";
+  if (ua.includes("crios/") || ua.includes("chrome/")) return "Chrome";
   if (ua.includes("edg/")) return "Edge";
-  if (ua.includes("opr/") || ua.includes("opera")) return "Opera";
-  if (ua.includes("firefox/")) return "Firefox";
-  if (ua.includes("safari/") && !ua.includes("chrome/")) return "Safari";
-  if (ua.includes("chrome/")) return "Chrome";
+  if (ua.includes("safari/") && !ua.includes("chrome/") && !ua.includes("crios/")) {
+    return "Safari";
+  }
   return "";
 }
 
@@ -290,10 +317,12 @@ export default function HomePage() {
     localStorage.setItem(DEVICE_ID_STORAGE_KEY, resolvedDeviceId);
     setDeviceId(resolvedDeviceId);
 
-    const storedLabel = normalizeDeviceLabel(
-      localStorage.getItem(DEVICE_LABEL_STORAGE_KEY)
-    );
-    const resolvedLabel = storedLabel || fallbackDeviceLabel(resolvedDeviceId);
+    const storedLabel = normalizeDeviceLabel(localStorage.getItem(DEVICE_LABEL_STORAGE_KEY));
+    const looksGenericStoredLabel = /^dispositivo\b/i.test(storedLabel);
+    const resolvedLabel =
+      !storedLabel || looksGenericStoredLabel
+        ? fallbackDeviceLabel(resolvedDeviceId)
+        : storedLabel;
     localStorage.setItem(DEVICE_LABEL_STORAGE_KEY, resolvedLabel);
     setDeviceLabel(resolvedLabel);
     debugTrace("device:init", {
@@ -1361,4 +1390,3 @@ export default function HomePage() {
     </main>
   );
 }
-
