@@ -229,6 +229,50 @@ function debugTrace(event: string, details?: Record<string, unknown>) {
   console.info("[clipcode][ui]", event, details ?? {});
 }
 
+function PasteIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" className="h-4 w-4">
+      <path
+        d="M9 3h6l1 2h3v16H5V5h3l1-2Zm1.2 2-.5 1H7v13h10V6h-2.7l-.5-1h-3.6Z"
+        fill="currentColor"
+      />
+    </svg>
+  );
+}
+
+function TrashIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" className="h-4 w-4">
+      <path
+        d="M9 3h6l1 2h4v2H4V5h4l1-2Zm-1 6h2v9H8V9Zm6 0h2v9h-2V9ZM6 9h12l-1 11H7L6 9Z"
+        fill="currentColor"
+      />
+    </svg>
+  );
+}
+
+function OpenIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" className="h-4 w-4">
+      <path
+        d="M14 3h7v7h-2V6.4l-8.3 8.3-1.4-1.4L17.6 5H14V3ZM5 5h6v2H7v10h10v-4h2v6H5V5Z"
+        fill="currentColor"
+      />
+    </svg>
+  );
+}
+
+function CopyIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" className="h-4 w-4">
+      <path
+        d="M8 3h11v14H8V3Zm2 2v10h7V5h-7ZM5 7H3v14h11v-2H5V7Z"
+        fill="currentColor"
+      />
+    </svg>
+  );
+}
+
 export default function HomePage() {
   const [tab, setTab] = useState<"send" | "receive">("send");
 
@@ -809,6 +853,29 @@ export default function HomePage() {
     }
   }
 
+  async function pasteLinkAt(index: number) {
+    try {
+      const raw = await navigator.clipboard.readText();
+      const nextValue = String(raw ?? "").trim();
+      if (!nextValue) {
+        showToast("Portapapeles vacio");
+        return;
+      }
+      const next = [...linkInputs];
+      next[index] = nextValue;
+      setLinkInputs(next);
+      showToast("Link pegado");
+    } catch {
+      showToast("No se pudo pegar");
+    }
+  }
+
+  function clearLinkAt(index: number) {
+    const next = [...linkInputs];
+    next[index] = "";
+    setLinkInputs(next);
+  }
+
   async function fetchPairStatusOnce(targetDeviceId: string): Promise<PairedReceiverInfo | null> {
     const normalizedDeviceId = normalizeDeviceId(targetDeviceId);
     if (!normalizedDeviceId) return null;
@@ -1255,22 +1322,41 @@ export default function HomePage() {
               {linkInputs.map((value, index) => {
                 const invalid = invalidLinkIndexes.includes(index);
                 return (
-                  <input
-                    key={`link-${index}`}
-                    value={value}
-                    onChange={(event) => {
-                      const next = [...linkInputs];
-                      next[index] = event.target.value;
-                      setLinkInputs(next);
-                    }}
-                    placeholder={`https://example.com/${index + 1}`}
-                    className={clsx(
-                      "w-full rounded-xl border px-4 py-3 text-base outline-none transition",
-                      invalid
-                        ? "border-rose-500/90 bg-rose-500/10 focus:ring-2 focus:ring-rose-300/30"
-                        : "border-white/10 bg-[#0d1018] focus:border-cyan-300/70 focus:ring-2 focus:ring-cyan-200/20"
-                    )}
-                  />
+                  <div key={`link-${index}`} className="flex items-center gap-2">
+                    <input
+                      value={value}
+                      onChange={(event) => {
+                        const next = [...linkInputs];
+                        next[index] = event.target.value;
+                        setLinkInputs(next);
+                      }}
+                      placeholder={`https://example.com/${index + 1}`}
+                      className={clsx(
+                        "w-full rounded-xl border px-4 py-3 text-base outline-none transition",
+                        invalid
+                          ? "border-rose-500/90 bg-rose-500/10 focus:ring-2 focus:ring-rose-300/30"
+                          : "border-white/10 bg-[#0d1018] focus:border-cyan-300/70 focus:ring-2 focus:ring-cyan-200/20"
+                      )}
+                    />
+                    <button
+                      type="button"
+                      title="Pegar"
+                      aria-label={`Pegar link ${index + 1}`}
+                      onClick={() => void pasteLinkAt(index)}
+                      className="inline-flex h-10 w-10 items-center justify-center rounded-xl border border-cyan-200/30 bg-cyan-400/15 text-cyan-100 transition hover:bg-cyan-400/25"
+                    >
+                      <PasteIcon />
+                    </button>
+                    <button
+                      type="button"
+                      title="Borrar"
+                      aria-label={`Borrar link ${index + 1}`}
+                      onClick={() => clearLinkAt(index)}
+                      className="inline-flex h-10 w-10 items-center justify-center rounded-xl border border-rose-300/30 bg-rose-400/15 text-rose-100 transition hover:bg-rose-400/25"
+                    >
+                      <TrashIcon />
+                    </button>
+                  </div>
                 );
               })}
             </div>
@@ -1568,15 +1654,21 @@ export default function HomePage() {
                             href={link}
                             target="_blank"
                             rel="noopener noreferrer"
-                            className="rounded-xl border border-cyan-300/30 bg-cyan-400/20 px-4 py-2 text-sm font-medium text-cyan-100 transition hover:bg-cyan-400/30"
+                            title="Abrir link"
+                            aria-label="Abrir link"
+                            className="inline-flex items-center gap-2 rounded-xl border border-cyan-300/30 bg-cyan-400/20 px-4 py-2 text-sm font-medium text-cyan-100 transition hover:bg-cyan-400/30"
                           >
-                            Abrir
+                            <OpenIcon />
+                            <span>Abrir</span>
                           </a>
                           <button
                             onClick={() => void copyToClipboard(link)}
-                            className="rounded-xl bg-gradient-to-r from-cyan-300 to-blue-300 px-4 py-2 text-sm font-semibold text-slate-950"
+                            title="Copiar link"
+                            aria-label="Copiar link"
+                            className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-cyan-300 to-blue-300 px-4 py-2 text-sm font-semibold text-slate-950"
                           >
-                            Copiar
+                            <CopyIcon />
+                            <span>Copiar</span>
                           </button>
                         </div>
                       </div>
