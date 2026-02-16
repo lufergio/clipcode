@@ -8,6 +8,7 @@ const MAX_TEXT_SIZE = 5_000;
 const MAX_LINKS = 10;
 const MAX_LINK_SIZE = 2_000;
 const PAIRING_TTL_SECONDS = 60 * 60 * 24 * 30; // 30 dias
+const DEBUG_TRACE = process.env.NODE_ENV !== "production";
 type RateLimitError = Error & { resetSeconds?: number };
 
 /**
@@ -66,6 +67,15 @@ type SenderPairPayload = {
   senderDeviceLabel?: string;
 };
 
+type NearbyPayload = {
+  messageId: string;
+  code: string;
+  links: string[];
+  text?: string;
+  senderDeviceLabel?: string;
+  createdAt: number;
+};
+
 function isHttpUrl(value: string): boolean {
   try {
     const url = new URL(value);
@@ -80,6 +90,18 @@ function normalizeDeviceId(value: unknown): string {
   if (!normalized) return "";
   if (!/^[a-zA-Z0-9_-]{8,64}$/.test(normalized)) return "";
   return normalized;
+}
+
+function createMessageId(): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return crypto.randomUUID();
+  }
+  return `msg_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function debugTrace(event: string, details: Record<string, unknown>) {
+  if (!DEBUG_TRACE) return;
+  console.info("[clipcode][api][share]", event, details);
 }
 
 /**
@@ -115,6 +137,12 @@ export async function POST(req: Request) {
       ? ttlCandidate
       : DEFAULT_TTL_SECONDS;
     const senderDeviceId = normalizeDeviceId(body?.senderDeviceId);
+    debugTrace("request", {
+      linksCount: links.length,
+      hasText: Boolean(text),
+      ttlSeconds,
+      senderDeviceId: senderDeviceId || null,
+    });
 
     if (links.length > MAX_LINKS) {
       return NextResponse.json(
@@ -173,12 +201,24 @@ export async function POST(req: Request) {
     await redis.set(`clipcode:${code}`, JSON.stringify(payload), {
       ex: ttlSeconds,
     });
+    debugTrace("stored-code", {
+      code,
+      ttlSeconds,
+    });
+
+    let nearbyQueued = false;
+    let nearbyReason: "queued" | "not_paired" | "invalid_pair_payload" | "no_sender_device" =
+      "no_sender_device";
 
     // Si el emisor esta emparejado, publica ultimo item en la bandeja del receptor.
     if (senderDeviceId) {
       const rawSenderPairPayload = await redis.get<string | SenderPairPayload>(
         `clipcode:pair:sender:${senderDeviceId}`
       );
+      debugTrace("pair:lookup", {
+        senderDeviceId,
+        found: Boolean(rawSenderPairPayload),
+      });
 
       let receiverDeviceId = "";
       let senderDeviceLabel = "";
@@ -199,29 +239,58 @@ export async function POST(req: Request) {
       }
 
       if (receiverDeviceId) {
+        const nearbyPayload: NearbyPayload = {
+          messageId: createMessageId(),
+          code,
+          links,
+          text: text || undefined,
+          senderDeviceLabel: senderDeviceLabel || undefined,
+          createdAt: Date.now(),
+        };
         await redis.set(
           `clipcode:nearby:${receiverDeviceId}`,
-          JSON.stringify({
-            code,
-            links,
-            text: text || undefined,
-            senderDeviceLabel: senderDeviceLabel || undefined,
-            createdAt: Date.now(),
-          }),
+          JSON.stringify(nearbyPayload),
           { ex: ttlSeconds }
         );
+        nearbyQueued = true;
+        nearbyReason = "queued";
+        debugTrace("nearby:stored", {
+          senderDeviceId,
+          receiverDeviceId,
+          code,
+          ttlSeconds,
+          messageId: nearbyPayload.messageId,
+        });
 
         // Refresca vigencia del pairing activo.
         await redis.expire(
           `clipcode:pair:sender:${senderDeviceId}`,
           PAIRING_TTL_SECONDS
         );
+        debugTrace("pair:ttl-refreshed", {
+          senderDeviceId,
+          pairingTtlSeconds: PAIRING_TTL_SECONDS,
+        });
+      } else {
+        nearbyReason = "invalid_pair_payload";
       }
+    } else {
+      nearbyReason = "no_sender_device";
+    }
+
+    if (senderDeviceId && nearbyReason === "no_sender_device") {
+      nearbyReason = "not_paired";
+    }
+
+    if (senderDeviceId && !nearbyQueued && nearbyReason !== "invalid_pair_payload") {
+      nearbyReason = "not_paired";
     }
 
     return NextResponse.json({
       code,
       expiresIn: ttlSeconds,
+      nearbyQueued,
+      nearbyReason,
     });
   } catch (error: unknown) {
     // ✅ Rate limit error

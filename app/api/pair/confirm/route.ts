@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { redis } from "@/lib/redis";
 
 const PAIRING_TTL_SECONDS = 60 * 60 * 24 * 30; // 30 dias
+const DEBUG_TRACE = process.env.NODE_ENV !== "production";
 
 type PairConfirmBody = {
   pairCode?: unknown;
@@ -34,9 +35,13 @@ function normalizeDeviceLabel(value: unknown): string {
 function normalizePairCode(value: unknown): string {
   return String(value ?? "")
     .trim()
-    .toUpperCase()
-    .replace(/[^A-Z0-9]/g, "")
+    .replace(/\D/g, "")
     .slice(0, 6);
+}
+
+function debugTrace(event: string, details: Record<string, unknown>) {
+  if (!DEBUG_TRACE) return;
+  console.info("[clipcode][api][pair/confirm]", event, details);
 }
 
 /**
@@ -49,6 +54,11 @@ export async function POST(req: Request) {
     const pairCode = normalizePairCode(body?.pairCode);
     const senderDeviceId = normalizeDeviceId(body?.senderDeviceId);
     const senderDeviceLabel = normalizeDeviceLabel(body?.senderDeviceLabel);
+    debugTrace("request", {
+      pairCode,
+      senderDeviceId,
+      hasSenderDeviceLabel: Boolean(senderDeviceLabel),
+    });
 
     if (!pairCode || !senderDeviceId) {
       return NextResponse.json(
@@ -59,6 +69,10 @@ export async function POST(req: Request) {
 
     const pairCodeKey = `clipcode:pair:code:${pairCode}`;
     const rawPairCodePayload = await redis.get<string | PairCodePayload>(pairCodeKey);
+    debugTrace("pair-code:lookup", {
+      pairCode,
+      found: Boolean(rawPairCodePayload),
+    });
 
     let receiverDeviceId = "";
     let receiverDeviceLabel = "";
@@ -95,6 +109,11 @@ export async function POST(req: Request) {
       { ex: PAIRING_TTL_SECONDS }
     );
     await redis.del(pairCodeKey);
+    debugTrace("linked", {
+      senderDeviceId,
+      receiverDeviceId,
+      expiresIn: PAIRING_TTL_SECONDS,
+    });
 
     return NextResponse.json({
       linked: true,

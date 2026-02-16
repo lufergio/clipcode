@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server";
 import { redis } from "@/lib/redis";
-import { generateCode } from "@/lib/code-generator";
+import { generateNumericCode } from "@/lib/code-generator";
 
 const PAIR_CODE_TTL_SECONDS = 600; // 10 min
+const DEBUG_TRACE = process.env.NODE_ENV !== "production";
 
 type PairCreateBody = {
   receiverDeviceId?: unknown;
@@ -25,6 +26,11 @@ function normalizeDeviceLabel(value: unknown): string {
   return String(value ?? "").trim().slice(0, 40);
 }
 
+function debugTrace(event: string, details: Record<string, unknown>) {
+  if (!DEBUG_TRACE) return;
+  console.info("[clipcode][api][pair/create]", event, details);
+}
+
 /**
  * POST /api/pair/create
  * Body: { receiverDeviceId: string; receiverDeviceLabel?: string }
@@ -34,6 +40,10 @@ export async function POST(req: Request) {
     const body = (await req.json()) as PairCreateBody;
     const receiverDeviceId = normalizeDeviceId(body?.receiverDeviceId);
     const receiverDeviceLabel = normalizeDeviceLabel(body?.receiverDeviceLabel);
+    debugTrace("request", {
+      receiverDeviceId,
+      hasReceiverDeviceLabel: Boolean(receiverDeviceLabel),
+    });
 
     if (!receiverDeviceId) {
       return NextResponse.json(
@@ -44,7 +54,7 @@ export async function POST(req: Request) {
 
     let pairCode = "";
     for (let i = 0; i < 5; i++) {
-      const candidate = generateCode(6);
+      const candidate = generateNumericCode(6);
       const exists = await redis.exists(`clipcode:pair:code:${candidate}`);
       if (!exists) {
         pairCode = candidate;
@@ -68,6 +78,11 @@ export async function POST(req: Request) {
       JSON.stringify(payload),
       { ex: PAIR_CODE_TTL_SECONDS }
     );
+    debugTrace("stored", {
+      pairCode,
+      receiverDeviceId,
+      expiresIn: PAIR_CODE_TTL_SECONDS,
+    });
 
     return NextResponse.json({
       pairCode,

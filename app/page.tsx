@@ -47,6 +47,7 @@ const MIN_VISIBLE_LINK_INPUTS = 3;
 const DEVICE_ID_STORAGE_KEY = "clipcode:device-id";
 const DEVICE_LABEL_STORAGE_KEY = "clipcode:device-label";
 const PAIRED_RECEIVER_STORAGE_KEY = "clipcode:paired-receiver";
+const DEBUG_TRACE = process.env.NODE_ENV !== "production";
 
 type PairedReceiverInfo = {
   receiverDeviceId: string;
@@ -67,6 +68,10 @@ function normalizeCode(value: string, maxLength: number): string {
     .toUpperCase()
     .replace(/[^A-Z0-9]/g, "")
     .slice(0, maxLength);
+}
+
+function normalizeNumericCode(value: string, maxLength: number): string {
+  return value.replace(/\D/g, "").slice(0, maxLength);
 }
 
 function normalizeDeviceId(value: unknown): string {
@@ -115,6 +120,11 @@ function fromSharedQuery(params: URLSearchParams): { links: string[]; text?: str
     links,
     text: text || undefined,
   };
+}
+
+function debugTrace(event: string, details?: Record<string, unknown>) {
+  if (!DEBUG_TRACE || typeof window === "undefined") return;
+  console.info("[clipcode][ui]", event, details ?? {});
 }
 
 export default function HomePage() {
@@ -242,6 +252,12 @@ export default function HomePage() {
     const resolvedLabel = storedLabel || fallbackDeviceLabel(resolvedDeviceId);
     localStorage.setItem(DEVICE_LABEL_STORAGE_KEY, resolvedLabel);
     setDeviceLabel(resolvedLabel);
+    debugTrace("device:init", {
+      resolvedDeviceId,
+      resolvedLabel,
+      hadStoredDeviceId: Boolean(stored),
+      hadStoredLabel: Boolean(storedLabel),
+    });
 
     const pairedReceiver = readPairedReceiverInfo();
     if (pairedReceiver) {
@@ -386,6 +402,12 @@ export default function HomePage() {
     setSendState({ status: "loading" });
 
     try {
+      debugTrace("share:request", {
+        linksCount: links.length,
+        hasText: Boolean(textValue),
+        ttlSeconds,
+        senderDeviceId: deviceId || null,
+      });
       const res = await fetch("/api/share", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -401,8 +423,19 @@ export default function HomePage() {
       const data = (await res.json()) as {
         code?: string;
         expiresIn?: number;
+        nearbyQueued?: boolean;
+        nearbyReason?: string;
         error?: string;
       };
+      debugTrace("share:response", {
+        ok: res.ok,
+        status: res.status,
+        code: data.code ?? null,
+        expiresIn: data.expiresIn ?? null,
+        nearbyQueued: data.nearbyQueued ?? null,
+        nearbyReason: data.nearbyReason ?? null,
+        error: data.error ?? null,
+      });
 
       if (!res.ok) {
         setSendState({
@@ -420,8 +453,20 @@ export default function HomePage() {
         createdAt: Date.now(),
       });
 
-      showToast("Codigo generado");
-    } catch {
+      if (deviceId && data.nearbyQueued === false) {
+        const nearbyMessage =
+          data.nearbyReason === "not_paired"
+            ? "Codigo generado. Buscar cerca no activo: falta vincular dispositivos."
+            : "Codigo generado. Buscar cerca no activo para este envio.";
+        showToast(nearbyMessage);
+      } else {
+        showToast("Codigo generado");
+      }
+
+    } catch (error: unknown) {
+      debugTrace("share:error", {
+        error: error instanceof Error ? error.message : String(error),
+      });
       setSendState({
         status: "error",
         message: "No se pudo conectar. Revisa tu servidor.",
@@ -439,7 +484,7 @@ export default function HomePage() {
   }
 
   function onPairCodeChange(value: string) {
-    setPairCodeInput(normalizeCode(value, 6));
+    setPairCodeInput(normalizeNumericCode(value, 6));
   }
 
   async function handleCreatePairCode() {
@@ -449,6 +494,10 @@ export default function HomePage() {
     }
 
     try {
+      debugTrace("pair:create:request", {
+        receiverDeviceId: deviceId,
+        receiverDeviceLabel: deviceLabel || null,
+      });
       const res = await fetch("/api/pair/create", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -462,6 +511,13 @@ export default function HomePage() {
         expiresIn?: number;
         error?: string;
       };
+      debugTrace("pair:create:response", {
+        ok: res.ok,
+        status: res.status,
+        pairCode: data.pairCode ?? null,
+        expiresIn: data.expiresIn ?? null,
+        error: data.error ?? null,
+      });
 
       if (!res.ok) {
         showToast(data.error ?? "No se pudo crear el pair code.");
@@ -474,7 +530,10 @@ export default function HomePage() {
         createdAt: Date.now(),
       });
       showToast("Pair code creado");
-    } catch {
+    } catch (error: unknown) {
+      debugTrace("pair:create:error", {
+        error: error instanceof Error ? error.message : String(error),
+      });
       showToast("No se pudo crear el pair code.");
     }
   }
@@ -488,11 +547,11 @@ export default function HomePage() {
       return;
     }
 
-    const normalizedPairCode = normalizeCode(pairCodeInput, 6);
+    const normalizedPairCode = normalizeNumericCode(pairCodeInput, 6);
     if (normalizedPairCode.length !== 6) {
       setPairState({
         status: "error",
-        message: "Ingresa el pair code completo (6 caracteres).",
+        message: "Ingresa el pair code completo (6 digitos).",
       });
       return;
     }
@@ -500,6 +559,11 @@ export default function HomePage() {
     setPairState({ status: "linking" });
 
     try {
+      debugTrace("pair:confirm:request", {
+        pairCode: normalizedPairCode,
+        senderDeviceId: deviceId,
+        senderDeviceLabel: deviceLabel || null,
+      });
       const res = await fetch("/api/pair/confirm", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -516,6 +580,13 @@ export default function HomePage() {
         receiverDeviceLabel?: string;
         error?: string;
       };
+      debugTrace("pair:confirm:response", {
+        ok: res.ok,
+        status: res.status,
+        linked: Boolean(data.linked),
+        receiverDeviceId: data.receiverDeviceId ?? null,
+        error: data.error ?? null,
+      });
 
       if (!res.ok || !data.linked || !data.receiverDeviceId) {
         setPairState({
@@ -536,7 +607,10 @@ export default function HomePage() {
         receiverDeviceLabel: linkedInfo.receiverDeviceLabel,
       });
       showToast("Dispositivo vinculado");
-    } catch {
+    } catch (error: unknown) {
+      debugTrace("pair:confirm:error", {
+        error: error instanceof Error ? error.message : String(error),
+      });
       setPairState({
         status: "error",
         message: "No se pudo vincular el dispositivo.",
@@ -552,17 +626,39 @@ export default function HomePage() {
 
   async function pollNearbyOnce(): Promise<{
     found: boolean;
-    item?: { code?: string; links: string[]; text?: string; senderDeviceLabel?: string };
+    item?: {
+      messageId?: string;
+      code?: string;
+      links: string[];
+      text?: string;
+      senderDeviceLabel?: string;
+    };
   }> {
+    debugTrace("nearby:poll:request", {
+      receiverDeviceId: deviceId || null,
+    });
     const res = await fetch(
       `/api/nearby/poll?receiverDeviceId=${encodeURIComponent(deviceId)}`
     );
 
     const data = (await res.json()) as {
       found?: boolean;
-      item?: { code?: string; links?: string[]; text?: string; senderDeviceLabel?: string };
+      item?: {
+        messageId?: string;
+        code?: string;
+        links?: string[];
+        text?: string;
+        senderDeviceLabel?: string;
+      };
       error?: string;
     };
+    debugTrace("nearby:poll:response", {
+      ok: res.ok,
+      status: res.status,
+      found: Boolean(data.found),
+      hasItem: Boolean(data.item),
+      error: data.error ?? null,
+    });
 
     if (!res.ok) {
       throw new Error(data.error ?? "Error searching nearby");
@@ -576,18 +672,48 @@ export default function HomePage() {
       ? data.item.links.map((value) => String(value ?? "").trim()).filter(Boolean)
       : [];
     const textValue = String(data.item.text ?? "").trim();
+    const messageIdValue = String(data.item.messageId ?? "").trim();
     const codeValue = String(data.item.code ?? "").trim().toUpperCase();
     const senderDeviceLabel = normalizeDeviceLabel(data.item.senderDeviceLabel);
 
     return {
       found: true,
       item: {
+        messageId: messageIdValue || undefined,
         code: codeValue || undefined,
         links,
         text: textValue || undefined,
         senderDeviceLabel: senderDeviceLabel || undefined,
       },
     };
+  }
+
+  async function ackNearbyItem(messageId: string): Promise<void> {
+    if (!deviceId || !messageId) return;
+    const res = await fetch("/api/nearby/ack", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        receiverDeviceId: deviceId,
+        messageId,
+      }),
+    });
+
+    const data = (await res.json()) as {
+      ok?: boolean;
+      consumed?: boolean;
+      error?: string;
+    };
+    debugTrace("nearby:ack:response", {
+      ok: res.ok,
+      status: res.status,
+      consumed: Boolean(data.consumed),
+      error: data.error ?? null,
+    });
+
+    if (!res.ok || !data.ok) {
+      throw new Error(data.error ?? "Error acknowledging nearby item");
+    }
   }
 
   async function handleNearbySearch() {
@@ -601,10 +727,25 @@ export default function HomePage() {
 
     clearNearbyPollTimer();
     setNearbyState({ status: "searching" });
+    debugTrace("nearby:search:start", {
+      receiverDeviceId: deviceId,
+    });
 
     const startedAt = Date.now();
-    const timeoutMs = 14_000;
-    const intervalMs = 2_000;
+    const timeoutMs = 30_000;
+    const initialIntervalMs = 900;
+    const maxIntervalMs = 4_500;
+    let attempts = 0;
+
+    const nextDelayMs = (): number => {
+      const base = Math.min(
+        maxIntervalMs,
+        Math.floor(initialIntervalMs * Math.pow(1.6, attempts))
+      );
+      attempts += 1;
+      const jitter = Math.floor(Math.random() * 350);
+      return base + jitter;
+    };
 
     const tick = async () => {
       try {
@@ -619,10 +760,29 @@ export default function HomePage() {
             sourceDeviceLabel: result.item.senderDeviceLabel,
           });
           setNearbyState({ status: "idle" });
+          debugTrace("nearby:search:found", {
+            messageId: result.item.messageId ?? null,
+            code: result.item.code ?? null,
+            linksCount: result.item.links.length,
+            hasText: Boolean(result.item.text),
+          });
+          if (result.item.messageId) {
+            try {
+              await ackNearbyItem(result.item.messageId);
+            } catch (error: unknown) {
+              debugTrace("nearby:ack:error", {
+                error: error instanceof Error ? error.message : String(error),
+                messageId: result.item.messageId,
+              });
+            }
+          }
           showToast("Contenido encontrado");
           return;
         }
-      } catch {
+      } catch (error: unknown) {
+        debugTrace("nearby:search:error", {
+          error: error instanceof Error ? error.message : String(error),
+        });
         setNearbyState({
           status: "error",
           message: "No se pudo completar la busqueda.",
@@ -631,13 +791,21 @@ export default function HomePage() {
       }
 
       if (Date.now() - startedAt >= timeoutMs) {
+        debugTrace("nearby:search:timeout", {
+          timeoutMs,
+        });
         setNearbyState({ status: "empty" });
         return;
       }
 
+      const delayMs = nextDelayMs();
+      debugTrace("nearby:search:retry", {
+        attempts,
+        delayMs,
+      });
       nearbyPollTimerRef.current = window.setTimeout(() => {
         void tick();
-      }, intervalMs);
+      }, delayMs);
     };
 
     void tick();
@@ -664,7 +832,7 @@ export default function HomePage() {
     const pairFromUrl = params.get("pair");
     if (pairFromUrl) {
       didAutoProcessRef.current = true;
-      const normalizedPair = normalizeCode(pairFromUrl, 6);
+      const normalizedPair = normalizeNumericCode(pairFromUrl, 6);
       setTab("send");
       setPairCodeInput(normalizedPair);
       showToast("Pair code detectado");
@@ -850,7 +1018,9 @@ export default function HomePage() {
                   <input
                     value={pairCodeInput}
                     onChange={(event) => onPairCodeChange(event.target.value)}
-                    placeholder="ABC123"
+                    inputMode="numeric"
+                    pattern="[0-9]*"
+                    placeholder="123456"
                     className="w-full rounded-xl bg-neutral-950 px-4 py-3 text-center text-lg tracking-widest outline-none ring-1 ring-neutral-800 focus:ring-2 focus:ring-neutral-400"
                   />
                   <button
