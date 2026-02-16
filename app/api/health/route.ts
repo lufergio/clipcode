@@ -14,9 +14,10 @@ export async function GET() {
       ok: true,
       redis: value,
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : "Unknown error";
     return NextResponse.json(
-      { ok: false, error: error?.message ?? "Unknown error" },
+      { ok: false, error: message },
       { status: 500 }
     );
   }

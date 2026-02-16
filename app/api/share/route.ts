@@ -2,8 +2,13 @@ import { NextResponse } from "next/server";
 import { redis } from "@/lib/redis";
 import { generateCode } from "@/lib/code-generator";
 
-const TTL_SECONDS = 300; // 5 minutos
-const MAX_SIZE = 5_000; // 5 KB aprox
+const DEFAULT_TTL_SECONDS = 300; // 5 minutos
+const ALLOWED_TTLS = new Set([180, 300, 600, 1800, 3600]); // 3, 5, 10, 30, 60 min
+const MAX_TEXT_SIZE = 5_000;
+const MAX_LINKS = 10;
+const MAX_LINK_SIZE = 2_000;
+const PAIRING_TTL_SECONDS = 60 * 60 * 24 * 30; // 30 dias
+type RateLimitError = Error & { resetSeconds?: number };
 
 /**
  * Rate limit PRO (serverless-safe) usando Redis.
@@ -30,8 +35,8 @@ async function rateLimitOrThrow(params: {
   const resetSeconds = ttl > 0 ? ttl : params.windowSeconds;
 
   if (count > params.limit) {
-    const err = new Error("RATE_LIMIT");
-    (err as any).resetSeconds = resetSeconds;
+    const err = new Error("RATE_LIMIT") as RateLimitError;
+    err.resetSeconds = resetSeconds;
     throw err;
   }
 
@@ -41,9 +46,39 @@ async function rateLimitOrThrow(params: {
   };
 }
 
+type ShareRequestBody = {
+  links?: unknown;
+  text?: unknown;
+  ttlSeconds?: unknown;
+  senderDeviceId?: unknown;
+};
+
+type StoredClipPayload = {
+  links: string[];
+  text?: string;
+  createdAt: number;
+  reads: number;
+};
+
+function isHttpUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function normalizeDeviceId(value: unknown): string {
+  const normalized = String(value ?? "").trim();
+  if (!normalized) return "";
+  if (!/^[a-zA-Z0-9_-]{8,64}$/.test(normalized)) return "";
+  return normalized;
+}
+
 /**
  * POST /api/share
- * Body: { text: string }
+ * Body: { links: string[]; text?: string; ttlSeconds: number; senderDeviceId?: string }
  */
 export async function POST(req: Request) {
   try {
@@ -61,14 +96,45 @@ export async function POST(req: Request) {
       windowSeconds: 60,
     });
 
-    const body = await req.json();
-    const text = String(body?.text ?? "").trim();
+    const body = (await req.json()) as ShareRequestBody;
 
-    if (!text) {
-      return NextResponse.json({ error: "Text is required" }, { status: 400 });
+    const rawLinks = Array.isArray(body?.links) ? body.links : [];
+    const links = rawLinks
+      .map((item) => String(item ?? "").trim())
+      .filter(Boolean);
+
+    const text = String(body?.text ?? "").trim();
+    const ttlCandidate = Number(body?.ttlSeconds ?? DEFAULT_TTL_SECONDS);
+    const ttlSeconds = ALLOWED_TTLS.has(ttlCandidate)
+      ? ttlCandidate
+      : DEFAULT_TTL_SECONDS;
+    const senderDeviceId = normalizeDeviceId(body?.senderDeviceId);
+
+    if (links.length > MAX_LINKS) {
+      return NextResponse.json(
+        { error: `Too many links. Max ${MAX_LINKS}` },
+        { status: 400 }
+      );
     }
 
-    if (text.length > MAX_SIZE) {
+    if (!links.length && !text) {
+      return NextResponse.json(
+        { error: "At least one link or text is required" },
+        { status: 400 }
+      );
+    }
+
+    const hasInvalidLink = links.some(
+      (link) => link.length > MAX_LINK_SIZE || !isHttpUrl(link)
+    );
+    if (hasInvalidLink) {
+      return NextResponse.json(
+        { error: "Invalid links. Use valid http/https URLs." },
+        { status: 400 }
+      );
+    }
+
+    if (text.length > MAX_TEXT_SIZE) {
       return NextResponse.json({ error: "Text too large" }, { status: 413 });
     }
 
@@ -90,7 +156,8 @@ export async function POST(req: Request) {
       );
     }
 
-    const payload = {
+    const payload: StoredClipPayload = {
+      links,
       text,
       createdAt: Date.now(),
       reads: 0,
@@ -98,17 +165,43 @@ export async function POST(req: Request) {
 
     // Guardar con TTL
     await redis.set(`clipcode:${code}`, JSON.stringify(payload), {
-      ex: TTL_SECONDS,
+      ex: ttlSeconds,
     });
+
+    // Si el emisor esta emparejado, publica ultimo item en la bandeja del receptor.
+    if (senderDeviceId) {
+      const receiverDeviceId = await redis.get<string>(
+        `clipcode:pair:sender:${senderDeviceId}`
+      );
+
+      if (receiverDeviceId) {
+        await redis.set(
+          `clipcode:nearby:${receiverDeviceId}`,
+          JSON.stringify({
+            code,
+            links,
+            text: text || undefined,
+            createdAt: Date.now(),
+          }),
+          { ex: ttlSeconds }
+        );
+
+        // Refresca vigencia del pairing activo.
+        await redis.expire(
+          `clipcode:pair:sender:${senderDeviceId}`,
+          PAIRING_TTL_SECONDS
+        );
+      }
+    }
 
     return NextResponse.json({
       code,
-      expiresIn: TTL_SECONDS,
+      expiresIn: ttlSeconds,
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     // ✅ Rate limit error
-    if (error?.message === "RATE_LIMIT") {
-      const resetSeconds = Number(error?.resetSeconds ?? 60);
+    if (error instanceof Error && error.message === "RATE_LIMIT") {
+      const resetSeconds = Number((error as RateLimitError).resetSeconds ?? 60);
 
       return NextResponse.json(
         {

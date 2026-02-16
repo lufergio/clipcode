@@ -4,9 +4,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { QRCodeCanvas } from "qrcode.react";
 import clsx from "clsx";
 
-/**
- * Tipos de estado para controlar la UX.
- */
 type SendState =
   | { status: "idle" }
   | { status: "loading" }
@@ -16,12 +13,34 @@ type SendState =
 type ReceiveState =
   | { status: "idle" }
   | { status: "loading" }
-  | { status: "success"; code: string; text: string }
+  | { status: "success"; code: string; links: string[]; text?: string }
   | { status: "error"; message: string };
 
-/**
- * Detecta si un texto es una URL http/https válida (simple).
- */
+type PairState =
+  | { status: "idle" }
+  | { status: "linking" }
+  | { status: "linked"; receiverDeviceId: string }
+  | { status: "error"; message: string };
+
+type NearbyState =
+  | { status: "idle" }
+  | { status: "searching" }
+  | { status: "empty" }
+  | { status: "error"; message: string };
+
+const TTL_OPTIONS = [
+  { label: "3 min", value: 180 },
+  { label: "5 min", value: 300 },
+  { label: "10 min", value: 600 },
+  { label: "30 min", value: 1800 },
+  { label: "60 min", value: 3600 },
+];
+
+const MAX_LINKS = 10;
+const MIN_VISIBLE_LINK_INPUTS = 3;
+const DEVICE_ID_STORAGE_KEY = "clipcode:device-id";
+const PAIRED_RECEIVER_STORAGE_KEY = "clipcode:paired-receiver";
+
 function isHttpUrl(value: string): boolean {
   try {
     const url = new URL(value.trim());
@@ -31,32 +50,83 @@ function isHttpUrl(value: string): boolean {
   }
 }
 
+function normalizeCode(value: string, maxLength: number): string {
+  return value
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, "")
+    .slice(0, maxLength);
+}
+
+function normalizeDeviceId(value: unknown): string {
+  const normalized = String(value ?? "").trim();
+  if (!normalized) return "";
+  if (!/^[a-zA-Z0-9_-]{8,64}$/.test(normalized)) return "";
+  return normalized;
+}
+
+function createDeviceId(): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return crypto.randomUUID().replace(/-/g, "");
+  }
+  return `dev${Math.random().toString(36).slice(2, 14)}`;
+}
+
+function shortenLink(value: string): string {
+  try {
+    const url = new URL(value);
+    const full = `${url.hostname}${url.pathname}${url.search}`;
+    return full.length > 48 ? `${full.slice(0, 48)}...` : full;
+  } catch {
+    return value.length > 48 ? `${value.slice(0, 48)}...` : value;
+  }
+}
+
+function fromSharedQuery(params: URLSearchParams): { links: string[]; text?: string } {
+  const sharedTitle = (params.get("title") ?? "").trim();
+  const sharedText = (params.get("text") ?? "").trim();
+  const sharedUrl = (params.get("url") ?? "").trim();
+
+  const links = sharedUrl && isHttpUrl(sharedUrl) ? [sharedUrl] : [];
+  const textParts = [sharedTitle, sharedText].filter(Boolean);
+  const text = textParts.join("\n").trim();
+
+  return {
+    links,
+    text: text || undefined,
+  };
+}
+
 export default function HomePage() {
   const [tab, setTab] = useState<"send" | "receive">("send");
 
-  // ---------- ENVIAR ----------
+  const [linkInputs, setLinkInputs] = useState<string[]>(["", "", ""]);
+  const [showTextComposer, setShowTextComposer] = useState(false);
   const [text, setText] = useState("");
+  const [ttlSeconds, setTtlSeconds] = useState(300);
   const [sendState, setSendState] = useState<SendState>({ status: "idle" });
 
-  // ---------- RECIBIR ----------
   const [codeInput, setCodeInput] = useState("");
-  const [receiveState, setReceiveState] = useState<ReceiveState>({
-    status: "idle",
-  });
+  const [receiveState, setReceiveState] = useState<ReceiveState>({ status: "idle" });
+  const [receiveTextOpen, setReceiveTextOpen] = useState(true);
 
-  // ---------- TOAST ----------
+  const [pairCodeInput, setPairCodeInput] = useState("");
+  const [pairingCode, setPairingCode] = useState<{
+    code: string;
+    expiresIn: number;
+    createdAt: number;
+  } | null>(null);
+  const [pairState, setPairState] = useState<PairState>({ status: "idle" });
+  const [nearbyState, setNearbyState] = useState<NearbyState>({ status: "idle" });
+  const [deviceId, setDeviceId] = useState("");
+
   const [toast, setToast] = useState<string | null>(null);
   const toastTimerRef = useRef<number | null>(null);
+  const nearbyPollTimerRef = useRef<number | null>(null);
+  const didAutoProcessRef = useRef(false);
 
   const sendTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const receiveInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Evita doble auto-proceso (React StrictMode / rerenders)
-  const didAutoProcessRef = useRef(false);
-
-  /**
-   * Muestra un toast flotante por unos segundos.
-   */
   function showToast(message: string) {
     setToast(message);
 
@@ -70,13 +140,53 @@ export default function HomePage() {
     }, 1800);
   }
 
-  // Autofocus según tab
+  function clearNearbyPollTimer() {
+    if (nearbyPollTimerRef.current) {
+      window.clearTimeout(nearbyPollTimerRef.current);
+      nearbyPollTimerRef.current = null;
+    }
+  }
+
+  const cleanedLinks = useMemo(
+    () => linkInputs.map((value) => value.trim()).filter(Boolean),
+    [linkInputs]
+  );
+
+  const invalidLinkIndexes = useMemo(() => {
+    const result: number[] = [];
+    linkInputs.forEach((value, index) => {
+      const trimmed = value.trim();
+      if (!trimmed) return;
+      if (!isHttpUrl(trimmed)) {
+        result.push(index);
+      }
+    });
+    return result;
+  }, [linkInputs]);
+
+  const canAddLinkInput = linkInputs.length < MAX_LINKS;
+
   useEffect(() => {
     if (tab === "send") sendTextareaRef.current?.focus();
     if (tab === "receive") receiveInputRef.current?.focus();
   }, [tab]);
 
-  // Contador de expiración (solo si hay success)
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const stored = normalizeDeviceId(localStorage.getItem(DEVICE_ID_STORAGE_KEY));
+    const resolvedDeviceId = stored || createDeviceId();
+    localStorage.setItem(DEVICE_ID_STORAGE_KEY, resolvedDeviceId);
+    setDeviceId(resolvedDeviceId);
+
+    const pairedReceiver = normalizeDeviceId(
+      localStorage.getItem(PAIRED_RECEIVER_STORAGE_KEY)
+    );
+    if (pairedReceiver) {
+      setPairState({ status: "linked", receiverDeviceId: pairedReceiver });
+    }
+  }, []);
+
   const secondsLeft = useMemo(() => {
     if (sendState.status !== "success") return null;
     const elapsed = Math.floor((Date.now() - sendState.createdAt) / 1000);
@@ -90,30 +200,24 @@ export default function HomePage() {
     return `${mm}:${ss}`;
   }, [secondsLeft]);
 
-  // Tick cada 1s para el contador
   useEffect(() => {
     if (sendState.status !== "success") return;
-    const t = setInterval(() => {
-      // fuerza recompute del memo leyendo Date.now()
+    const timer = window.setInterval(() => {
       setSendState((prev) => {
         if (prev.status !== "success") return prev;
         return { ...prev };
       });
     }, 1000);
-    return () => clearInterval(t);
+    return () => window.clearInterval(timer);
   }, [sendState.status]);
 
-  /**
-   * GET /api/fetch/:code
-   * Recupera y auto-destruye el contenido.
-   */
   async function handleFetch(codeRaw?: string) {
-    const code = String(codeRaw ?? codeInput).trim().toUpperCase();
+    const code = normalizeCode(String(codeRaw ?? codeInput), 4);
 
     if (code.length < 4) {
       setReceiveState({
         status: "error",
-        message: "Ingresa el código completo (4 caracteres).",
+        message: "Ingresa el codigo completo (4 caracteres).",
       });
       return;
     }
@@ -122,21 +226,36 @@ export default function HomePage() {
 
     try {
       const res = await fetch(`/api/fetch/${encodeURIComponent(code)}`);
-      const data = await res.json();
+      const data = (await res.json()) as {
+        code?: string;
+        links?: string[];
+        text?: string;
+        error?: string;
+      };
 
       if (!res.ok) {
+        const fallback =
+          "No se encontro el codigo. Puede haber expirado o ya fue consumido. Genera uno nuevo e intenta de nuevo.";
         setReceiveState({
           status: "error",
-          message: data?.error ?? "Código inválido o expirado.",
+          message: data?.error ?? fallback,
         });
         return;
       }
 
+      const links = Array.isArray(data?.links)
+        ? data.links.map((value) => String(value ?? "").trim()).filter(Boolean)
+        : [];
+      const receivedText = String(data?.text ?? "").trim();
+
+      setReceiveTextOpen(true);
       setReceiveState({
         status: "success",
-        code: data.code,
-        text: data.text,
+        code: String(data?.code ?? code),
+        links,
+        text: receivedText || undefined,
       });
+      setNearbyState({ status: "idle" });
     } catch {
       setReceiveState({
         status: "error",
@@ -145,32 +264,54 @@ export default function HomePage() {
     }
   }
 
-  /**
-   * Copiar al portapapeles con toast (sin alert).
-   */
   async function copyToClipboard(value: string) {
     try {
       await navigator.clipboard.writeText(value);
-      showToast("Copiado ✅");
+      showToast("Copiado");
     } catch {
-      showToast("No se pudo copiar ❌");
+      showToast("No se pudo copiar");
     }
   }
 
-  /**
-   * POST /api/share
-   * Envía el texto al backend y recibe un código.
-   *
-   * - textOverride: usado para casos donde el texto llega por query (?text=...)
-   *   o por Share Sheet desde Android.
-   */
-  async function handleGenerate(textOverride?: string) {
-    const clean = String(textOverride ?? text).trim();
+  function applyPayloadToComposer(payload: { links: string[]; text?: string }) {
+    const nextLinks = [...payload.links];
+    while (nextLinks.length < MIN_VISIBLE_LINK_INPUTS) nextLinks.push("");
+    setLinkInputs(nextLinks.slice(0, MAX_LINKS));
 
-    if (!clean) {
+    const normalizedText = String(payload.text ?? "").trim();
+    setText(normalizedText);
+    setShowTextComposer(Boolean(normalizedText));
+  }
+
+  async function handleGenerate(payloadOverride?: { links: string[]; text?: string }) {
+    const payload = payloadOverride ?? {
+      links: cleanedLinks,
+      text: text.trim() || undefined,
+    };
+
+    const links = payload.links.map((value) => value.trim()).filter(Boolean);
+    const textValue = String(payload.text ?? "").trim();
+
+    if (!links.length && !textValue) {
       setSendState({
         status: "error",
-        message: "Pega un texto o link primero.",
+        message: "Agrega al menos un link o texto.",
+      });
+      return;
+    }
+
+    if (links.length > MAX_LINKS) {
+      setSendState({
+        status: "error",
+        message: `Maximo ${MAX_LINKS} links por envio.`,
+      });
+      return;
+    }
+
+    if (links.some((value) => !isHttpUrl(value))) {
+      setSendState({
+        status: "error",
+        message: "Corrige los links invalidos (solo http/https).",
       });
       return;
     }
@@ -181,30 +322,37 @@ export default function HomePage() {
       const res = await fetch("/api/share", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: clean }),
+        body: JSON.stringify({
+          links,
+          text: textValue || undefined,
+          ttlSeconds,
+          senderDeviceId: deviceId || undefined,
+        }),
       });
 
-      const data = await res.json();
+      const data = (await res.json()) as {
+        code?: string;
+        expiresIn?: number;
+        error?: string;
+      };
 
       if (!res.ok) {
         setSendState({
           status: "error",
-          message: data?.error ?? "Error al generar el código.",
+          message: data?.error ?? "Error al generar el codigo.",
         });
         return;
       }
 
-      // Si venía de share/query, reflejamos el texto en el textarea.
-      setText(clean);
-
+      applyPayloadToComposer({ links, text: textValue || undefined });
       setSendState({
         status: "success",
-        code: data.code,
-        expiresIn: data.expiresIn,
+        code: String(data.code ?? ""),
+        expiresIn: Number(data.expiresIn ?? ttlSeconds),
         createdAt: Date.now(),
       });
 
-      showToast("Código generado ✅");
+      showToast("Codigo generado");
     } catch {
       setSendState({
         status: "error",
@@ -213,108 +361,283 @@ export default function HomePage() {
     }
   }
 
-  /**
-   * Normaliza input de código:
-   * - Mayúsculas
-   * - Solo alfanumérico
-   * - Máx 4
-   */
-  function onCodeChange(v: string) {
-    const cleaned = v.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 4);
+  function onCodeChange(value: string) {
+    const cleaned = normalizeCode(value, 4);
     setCodeInput(cleaned);
 
-    // Auto fetch al completar 4 chars
     if (cleaned.length === 4) {
-      handleFetch(cleaned);
+      void handleFetch(cleaned);
     }
   }
 
-  /**
-   * Auto-detección por query:
-   * 1) Recibir:  ?code=ABCD
-   * 2) Compartir / share_target / TWA: ?title=...&text=...&url=...&auto=1
-   *
-   * Reglas:
-   * - Si viene "code", manda a RECIBIR.
-   * - Si NO viene "code" pero viene title/text/url, manda a ENVIAR y precarga textarea.
-   * - Si auto=1 => genera el código automáticamente.
-   * - Limpia la URL para evitar duplicados al refrescar.
-   */
+  function onPairCodeChange(value: string) {
+    setPairCodeInput(normalizeCode(value, 6));
+  }
+
+  async function handleCreatePairCode() {
+    if (!deviceId) {
+      showToast("No se pudo inicializar el dispositivo.");
+      return;
+    }
+
+    try {
+      const res = await fetch("/api/pair/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ receiverDeviceId: deviceId }),
+      });
+      const data = (await res.json()) as {
+        pairCode?: string;
+        expiresIn?: number;
+        error?: string;
+      };
+
+      if (!res.ok) {
+        showToast(data.error ?? "No se pudo crear el pair code.");
+        return;
+      }
+
+      setPairingCode({
+        code: String(data.pairCode ?? ""),
+        expiresIn: Number(data.expiresIn ?? 600),
+        createdAt: Date.now(),
+      });
+      showToast("Pair code creado");
+    } catch {
+      showToast("No se pudo crear el pair code.");
+    }
+  }
+
+  async function handleConfirmPair() {
+    if (!deviceId) {
+      setPairState({
+        status: "error",
+        message: "No se pudo inicializar el dispositivo.",
+      });
+      return;
+    }
+
+    const normalizedPairCode = normalizeCode(pairCodeInput, 6);
+    if (normalizedPairCode.length !== 6) {
+      setPairState({
+        status: "error",
+        message: "Ingresa el pair code completo (6 caracteres).",
+      });
+      return;
+    }
+
+    setPairState({ status: "linking" });
+
+    try {
+      const res = await fetch("/api/pair/confirm", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          pairCode: normalizedPairCode,
+          senderDeviceId: deviceId,
+        }),
+      });
+
+      const data = (await res.json()) as {
+        linked?: boolean;
+        receiverDeviceId?: string;
+        error?: string;
+      };
+
+      if (!res.ok || !data.linked || !data.receiverDeviceId) {
+        setPairState({
+          status: "error",
+          message: data.error ?? "No se pudo vincular el dispositivo.",
+        });
+        return;
+      }
+
+      localStorage.setItem(PAIRED_RECEIVER_STORAGE_KEY, data.receiverDeviceId);
+      setPairState({
+        status: "linked",
+        receiverDeviceId: data.receiverDeviceId,
+      });
+      showToast("Dispositivo vinculado");
+    } catch {
+      setPairState({
+        status: "error",
+        message: "No se pudo vincular el dispositivo.",
+      });
+    }
+  }
+
+  async function pollNearbyOnce(): Promise<{
+    found: boolean;
+    item?: { code?: string; links: string[]; text?: string };
+  }> {
+    const res = await fetch(
+      `/api/nearby/poll?receiverDeviceId=${encodeURIComponent(deviceId)}`
+    );
+
+    const data = (await res.json()) as {
+      found?: boolean;
+      item?: { code?: string; links?: string[]; text?: string };
+      error?: string;
+    };
+
+    if (!res.ok) {
+      throw new Error(data.error ?? "Error searching nearby");
+    }
+
+    if (!data.found || !data.item) {
+      return { found: false };
+    }
+
+    const links = Array.isArray(data.item.links)
+      ? data.item.links.map((value) => String(value ?? "").trim()).filter(Boolean)
+      : [];
+    const textValue = String(data.item.text ?? "").trim();
+    const codeValue = String(data.item.code ?? "").trim().toUpperCase();
+
+    return {
+      found: true,
+      item: {
+        code: codeValue || undefined,
+        links,
+        text: textValue || undefined,
+      },
+    };
+  }
+
+  async function handleNearbySearch() {
+    if (!deviceId) {
+      setNearbyState({
+        status: "error",
+        message: "No se pudo inicializar el dispositivo.",
+      });
+      return;
+    }
+
+    clearNearbyPollTimer();
+    setNearbyState({ status: "searching" });
+
+    const startedAt = Date.now();
+    const timeoutMs = 14_000;
+    const intervalMs = 2_000;
+
+    const tick = async () => {
+      try {
+        const result = await pollNearbyOnce();
+        if (result.found && result.item) {
+          setReceiveTextOpen(true);
+          setReceiveState({
+            status: "success",
+            code: result.item.code ?? "PAIR",
+            links: result.item.links,
+            text: result.item.text,
+          });
+          setNearbyState({ status: "idle" });
+          showToast("Contenido encontrado");
+          return;
+        }
+      } catch {
+        setNearbyState({
+          status: "error",
+          message: "No se pudo completar la busqueda.",
+        });
+        return;
+      }
+
+      if (Date.now() - startedAt >= timeoutMs) {
+        setNearbyState({ status: "empty" });
+        return;
+      }
+
+      nearbyPollTimerRef.current = window.setTimeout(() => {
+        void tick();
+      }, intervalMs);
+    };
+
+    void tick();
+  }
+
   useEffect(() => {
     if (typeof window === "undefined") return;
     if (didAutoProcessRef.current) return;
 
     const params = new URLSearchParams(window.location.search);
 
-    // 1) Prioridad: recibir por link ?code=ABCD
     const codeFromUrl = params.get("code");
     if (codeFromUrl) {
       didAutoProcessRef.current = true;
 
-      const normalized = codeFromUrl.toUpperCase().slice(0, 4);
+      const normalized = normalizeCode(codeFromUrl, 4);
       setTab("receive");
       setCodeInput(normalized);
-      handleFetch(normalized);
-
-      // Limpia URL
+      void handleFetch(normalized);
       window.history.replaceState(null, "", "/");
       return;
     }
 
-    // 2) Compartir: title/text/url (+ auto=1)
-    const sharedTitle = (params.get("title") ?? "").trim();
-    const sharedText = (params.get("text") ?? "").trim();
-    const sharedUrl = (params.get("url") ?? "").trim();
-    const auto = (params.get("auto") ?? "").trim(); // "1" recomendado
-
-    if (sharedTitle || sharedText || sharedUrl) {
+    const pairFromUrl = params.get("pair");
+    if (pairFromUrl) {
       didAutoProcessRef.current = true;
-
-      const payload = [sharedTitle, sharedText, sharedUrl]
-        .filter(Boolean)
-        .join("\n")
-        .trim();
-
+      const normalizedPair = normalizeCode(pairFromUrl, 6);
       setTab("send");
-      setText(payload);
-      showToast("Contenido recibido ✅");
+      setPairCodeInput(normalizedPair);
+      showToast("Pair code detectado");
+      window.history.replaceState(null, "", "/");
+      return;
+    }
 
-      // Si auto=1, generamos de una.
+    const auto = (params.get("auto") ?? "").trim();
+    const fromQuery = fromSharedQuery(params);
+
+    if (fromQuery.links.length || fromQuery.text) {
+      didAutoProcessRef.current = true;
+      setTab("send");
+      applyPayloadToComposer(fromQuery);
+      showToast("Contenido recibido");
+
       if (auto === "1") {
-        void handleGenerate(payload);
+        void handleGenerate(fromQuery);
       }
 
-      // Limpia URL
       window.history.replaceState(null, "", "/");
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  useEffect(() => {
+    return () => {
+      clearNearbyPollTimer();
+      if (toastTimerRef.current) {
+        window.clearTimeout(toastTimerRef.current);
+      }
+    };
+  }, []);
+
   const shareLink = useMemo(() => {
     if (sendState.status !== "success") return "";
+    if (typeof window === "undefined") return `/?code=${sendState.code}`;
     return `${window.location.origin}/?code=${sendState.code}`;
   }, [sendState]);
 
-  // Determina si el contenido recibido es URL
-  const receivedIsUrl =
-    receiveState.status === "success" && isHttpUrl(receiveState.text);
+  const pairLink = useMemo(() => {
+    if (!pairingCode) return "";
+    if (typeof window === "undefined") return `/?pair=${pairingCode.code}`;
+    return `${window.location.origin}/?pair=${pairingCode.code}`;
+  }, [pairingCode]);
 
   return (
     <main className="min-h-screen bg-neutral-950 text-neutral-50">
-      <div className="mx-auto max-w-2xl px-4 py-10">
-        {/* Header */}
-        <header className="mb-8">
+      <div className="mx-auto max-w-3xl px-4 py-8">
+        <header className="mb-7">
           <h1 className="text-3xl font-semibold tracking-tight">ClipCode</h1>
           <p className="mt-2 text-sm text-neutral-300">
-            Pasa texto y links entre dispositivos con un código. Sin cuenta.
+            Pasa links y texto entre dispositivos con un codigo. Sin cuenta.
           </p>
         </header>
 
-        {/* Tabs */}
         <div className="mb-6 flex rounded-xl bg-neutral-900 p-1">
           <button
             className={clsx(
-              "flex-1 rounded-lg px-4 py-2 text-sm font-medium transition",
+              "flex-1 rounded-lg px-4 py-3 text-base font-medium transition",
               tab === "send"
                 ? "bg-neutral-50 text-neutral-950"
                 : "text-neutral-200 hover:bg-neutral-800"
@@ -325,7 +648,7 @@ export default function HomePage() {
           </button>
           <button
             className={clsx(
-              "flex-1 rounded-lg px-4 py-2 text-sm font-medium transition",
+              "flex-1 rounded-lg px-4 py-3 text-base font-medium transition",
               tab === "receive"
                 ? "bg-neutral-50 text-neutral-950"
                 : "text-neutral-200 hover:bg-neutral-800"
@@ -336,49 +659,147 @@ export default function HomePage() {
           </button>
         </div>
 
-        {/* Panel ENVIAR */}
         {tab === "send" && (
           <section className="rounded-2xl bg-neutral-900 p-5 shadow">
-            <h2 className="text-lg font-semibold">Pega aquí</h2>
+            <h2 className="text-lg font-semibold">Links</h2>
             <p className="mt-1 text-sm text-neutral-300">
-              Links, texto, claves… Se destruye al leer y expira solo.
+              Hasta 10 links por envio. Se consume una sola vez al recibir.
             </p>
 
-            <textarea
-              ref={sendTextareaRef}
-              value={text}
-              onChange={(e) => setText(e.target.value)}
-              className="mt-4 h-32 w-full resize-none rounded-xl bg-neutral-950 p-3 text-sm outline-none ring-1 ring-neutral-800 focus:ring-2 focus:ring-neutral-400"
-              placeholder="Pega un link o texto..."
-            />
-
-            <div className="mt-2 flex items-center justify-between text-xs text-neutral-400">
-              <span>{text.length} / 5000</span>
-              {sendState.status === "success" && (
-                <span>Expira en: {expiresLabel}</span>
-              )}
+            <div className="mt-4 space-y-3">
+              {linkInputs.map((value, index) => {
+                const invalid = invalidLinkIndexes.includes(index);
+                return (
+                  <input
+                    key={`link-${index}`}
+                    value={value}
+                    onChange={(event) => {
+                      const next = [...linkInputs];
+                      next[index] = event.target.value;
+                      setLinkInputs(next);
+                    }}
+                    placeholder={`https://example.com/${index + 1}`}
+                    className={clsx(
+                      "w-full rounded-xl bg-neutral-950 px-4 py-3 text-base outline-none ring-1",
+                      invalid
+                        ? "ring-red-500 focus:ring-red-400"
+                        : "ring-neutral-800 focus:ring-2 focus:ring-neutral-400"
+                    )}
+                  />
+                );
+              })}
             </div>
 
-            <div className="mt-4 flex gap-3">
+            <div className="mt-3 flex flex-wrap gap-2">
               <button
-                onClick={() => handleGenerate()}
-                disabled={sendState.status === "loading"}
-                className="rounded-xl bg-neutral-50 px-4 py-2 text-sm font-medium text-neutral-950 hover:opacity-90 disabled:opacity-60"
+                onClick={() => {
+                  if (!canAddLinkInput) return;
+                  setLinkInputs((prev) => [...prev, ""]);
+                }}
+                disabled={!canAddLinkInput}
+                className="rounded-xl bg-neutral-800 px-4 py-2 text-sm font-medium text-neutral-100 hover:bg-neutral-700 disabled:opacity-60"
               >
-                {sendState.status === "loading"
-                  ? "Generando..."
-                  : "Generar código"}
+                Agregar link
+              </button>
+
+              <button
+                onClick={() => setShowTextComposer((prev) => !prev)}
+                className="rounded-xl bg-neutral-800 px-4 py-2 text-sm font-medium text-neutral-100 hover:bg-neutral-700"
+              >
+                {showTextComposer ? "Ocultar texto" : "Agregar texto"}
+              </button>
+            </div>
+
+            {showTextComposer && (
+              <div className="mt-4">
+                <label className="mb-2 block text-sm font-medium text-neutral-200">
+                  Texto (opcional)
+                </label>
+                <textarea
+                  ref={sendTextareaRef}
+                  value={text}
+                  onChange={(event) => setText(event.target.value)}
+                  className="h-28 w-full resize-none rounded-xl bg-neutral-950 p-3 text-sm outline-none ring-1 ring-neutral-800 focus:ring-2 focus:ring-neutral-400"
+                  placeholder="Notas, codigo, instrucciones..."
+                />
+              </div>
+            )}
+
+            <div className="mt-4 grid gap-3 md:grid-cols-2">
+              <div>
+                <label className="mb-2 block text-sm font-medium text-neutral-200">
+                  Expiracion
+                </label>
+                <select
+                  value={ttlSeconds}
+                  onChange={(event) => setTtlSeconds(Number(event.target.value))}
+                  className="w-full rounded-xl bg-neutral-950 px-4 py-3 text-base outline-none ring-1 ring-neutral-800 focus:ring-2 focus:ring-neutral-400"
+                >
+                  {TTL_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="mb-2 block text-sm font-medium text-neutral-200">
+                  Pair code (enviar a dispositivo vinculado)
+                </label>
+                <div className="flex gap-2">
+                  <input
+                    value={pairCodeInput}
+                    onChange={(event) => onPairCodeChange(event.target.value)}
+                    placeholder="ABC123"
+                    className="w-full rounded-xl bg-neutral-950 px-4 py-3 text-center text-lg tracking-widest outline-none ring-1 ring-neutral-800 focus:ring-2 focus:ring-neutral-400"
+                  />
+                  <button
+                    onClick={() => void handleConfirmPair()}
+                    disabled={pairState.status === "linking"}
+                    className="rounded-xl bg-neutral-50 px-4 py-2 text-sm font-semibold text-neutral-950 hover:opacity-90 disabled:opacity-60"
+                  >
+                    {pairState.status === "linking" ? "Vinculando..." : "Vincular"}
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {pairState.status === "linked" && (
+              <div className="mt-3 rounded-xl bg-emerald-950/30 p-3 text-sm text-emerald-200 ring-1 ring-emerald-900">
+                Vinculado. Buscar cerca disponible para este par.
+              </div>
+            )}
+            {pairState.status === "error" && (
+              <div className="mt-3 rounded-xl bg-red-950/40 p-3 text-sm text-red-200 ring-1 ring-red-900">
+                {pairState.message}
+              </div>
+            )}
+
+            <div className="mt-4 flex flex-wrap gap-3">
+              <button
+                onClick={() => void handleGenerate()}
+                disabled={sendState.status === "loading"}
+                className="rounded-xl bg-neutral-50 px-5 py-3 text-base font-semibold text-neutral-950 hover:opacity-90 disabled:opacity-60"
+              >
+                {sendState.status === "loading" ? "Enviando..." : "Enviar"}
               </button>
 
               <button
                 onClick={() => {
+                  setLinkInputs(["", "", ""]);
                   setText("");
+                  setShowTextComposer(false);
                   setSendState({ status: "idle" });
                 }}
-                className="rounded-xl bg-neutral-800 px-4 py-2 text-sm font-medium text-neutral-100 hover:bg-neutral-700"
+                className="rounded-xl bg-neutral-800 px-5 py-3 text-base font-medium text-neutral-100 hover:bg-neutral-700"
               >
                 Nuevo
               </button>
+            </div>
+
+            <div className="mt-2 text-xs text-neutral-400">
+              {cleanedLinks.length} links listos / {MAX_LINKS}
             </div>
 
             {sendState.status === "error" && (
@@ -390,21 +811,19 @@ export default function HomePage() {
             {sendState.status === "success" && (
               <div className="mt-6 rounded-2xl bg-neutral-950 p-4 ring-1 ring-neutral-800">
                 <div className="flex flex-col items-center gap-3">
-                  <div className="text-5xl font-bold tracking-widest">
-                    {sendState.code}
-                  </div>
+                  <div className="text-5xl font-bold tracking-widest">{sendState.code}</div>
+                  <div className="text-sm text-neutral-300">Expira en: {expiresLabel}</div>
 
                   <div className="flex flex-wrap justify-center gap-2">
                     <button
                       className="rounded-xl bg-neutral-50 px-4 py-2 text-sm font-medium text-neutral-950"
-                      onClick={() => copyToClipboard(sendState.code)}
+                      onClick={() => void copyToClipboard(sendState.code)}
                     >
-                      Copiar código
+                      Copiar codigo
                     </button>
-
                     <button
                       className="rounded-xl bg-neutral-800 px-4 py-2 text-sm font-medium text-neutral-100"
-                      onClick={() => copyToClipboard(shareLink)}
+                      onClick={() => void copyToClipboard(shareLink)}
                     >
                       Copiar link
                     </button>
@@ -413,53 +832,97 @@ export default function HomePage() {
                   <div className="rounded-2xl bg-white p-3">
                     <QRCodeCanvas value={shareLink || sendState.code} size={180} />
                   </div>
-
-                  <p className="text-xs text-neutral-400">
-                    Consejo: en el otro dispositivo abre la web y escribe el
-                    código.
-                  </p>
                 </div>
               </div>
             )}
           </section>
         )}
 
-        {/* Panel RECIBIR */}
         {tab === "receive" && (
           <section className="rounded-2xl bg-neutral-900 p-5 shadow">
-            <h2 className="text-lg font-semibold">Ingresa el código</h2>
+            <h2 className="text-lg font-semibold">Recibir</h2>
             <p className="mt-1 text-sm text-neutral-300">
-              Al recuperar, se elimina automáticamente (1 lectura).
+              Puedes usar codigo manual o Buscar cerca con pairing.
             </p>
 
-            <input
-              ref={receiveInputRef}
-              value={codeInput}
-              onChange={(e) => onCodeChange(e.target.value)}
-              className="mt-4 w-full rounded-xl bg-neutral-950 p-3 text-center text-2xl tracking-widest outline-none ring-1 ring-neutral-800 focus:ring-2 focus:ring-neutral-400"
-              placeholder="A7F3"
-              inputMode="text"
-              autoCapitalize="characters"
-            />
-
-            <div className="mt-4 flex gap-3">
+            <div className="mt-4 grid gap-3 md:grid-cols-2">
               <button
-                onClick={() => handleFetch()}
-                disabled={receiveState.status === "loading"}
-                className="rounded-xl bg-neutral-50 px-4 py-2 text-sm font-medium text-neutral-950 hover:opacity-90 disabled:opacity-60"
+                onClick={() => void handleCreatePairCode()}
+                className="rounded-xl bg-neutral-50 px-5 py-3 text-base font-semibold text-neutral-950 hover:opacity-90"
               >
-                {receiveState.status === "loading" ? "Buscando..." : "Recibir"}
+                Generar pair code
               </button>
-
               <button
-                onClick={() => {
-                  setCodeInput("");
-                  setReceiveState({ status: "idle" });
-                }}
-                className="rounded-xl bg-neutral-800 px-4 py-2 text-sm font-medium text-neutral-100 hover:bg-neutral-700"
+                onClick={() => void handleNearbySearch()}
+                disabled={nearbyState.status === "searching"}
+                className="rounded-xl bg-blue-600 px-5 py-3 text-base font-semibold text-white hover:bg-blue-500 disabled:opacity-60"
               >
-                Limpiar
+                {nearbyState.status === "searching" ? "Buscando..." : "Buscar cerca"}
               </button>
+            </div>
+
+            {pairingCode && (
+              <div className="mt-4 rounded-2xl bg-neutral-950 p-4 ring-1 ring-neutral-800">
+                <div className="flex flex-col items-center gap-3">
+                  <div className="text-sm text-neutral-300">Pair code</div>
+                  <div className="text-4xl font-bold tracking-widest">{pairingCode.code}</div>
+                  <div className="text-xs text-neutral-400">
+                    Expira en {Math.ceil(pairingCode.expiresIn / 60)} min
+                  </div>
+                  <div className="rounded-2xl bg-white p-3">
+                    <QRCodeCanvas value={pairLink || pairingCode.code} size={180} />
+                  </div>
+                  <button
+                    onClick={() => void copyToClipboard(pairingCode.code)}
+                    className="rounded-xl bg-neutral-50 px-4 py-2 text-sm font-medium text-neutral-950"
+                  >
+                    Copiar pair code
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {nearbyState.status === "empty" && (
+              <div className="mt-4 rounded-xl bg-amber-950/30 p-3 text-sm text-amber-200 ring-1 ring-amber-900">
+                No se encontro nada. Verifica que hayas enviado a este dispositivo o escribe
+                el codigo manual.
+              </div>
+            )}
+            {nearbyState.status === "error" && (
+              <div className="mt-4 rounded-xl bg-red-950/40 p-3 text-sm text-red-200 ring-1 ring-red-900">
+                {nearbyState.message}
+              </div>
+            )}
+
+            <div className="mt-6 rounded-xl bg-neutral-950 p-4 ring-1 ring-neutral-800">
+              <h3 className="text-sm font-semibold text-neutral-200">Modo manual por codigo</h3>
+              <input
+                ref={receiveInputRef}
+                value={codeInput}
+                onChange={(event) => onCodeChange(event.target.value)}
+                className="mt-3 w-full rounded-xl bg-neutral-900 p-3 text-center text-2xl tracking-widest outline-none ring-1 ring-neutral-800 focus:ring-2 focus:ring-neutral-400"
+                placeholder="A7F3"
+                inputMode="text"
+                autoCapitalize="characters"
+              />
+              <div className="mt-3 flex gap-2">
+                <button
+                  onClick={() => void handleFetch()}
+                  disabled={receiveState.status === "loading"}
+                  className="rounded-xl bg-neutral-50 px-4 py-2 text-sm font-semibold text-neutral-950 hover:opacity-90 disabled:opacity-60"
+                >
+                  {receiveState.status === "loading" ? "Buscando..." : "Recibir"}
+                </button>
+                <button
+                  onClick={() => {
+                    setCodeInput("");
+                    setReceiveState({ status: "idle" });
+                  }}
+                  className="rounded-xl bg-neutral-800 px-4 py-2 text-sm font-medium text-neutral-100 hover:bg-neutral-700"
+                >
+                  Limpiar
+                </button>
+              </div>
             </div>
 
             {receiveState.status === "error" && (
@@ -470,49 +933,72 @@ export default function HomePage() {
 
             {receiveState.status === "success" && (
               <div className="mt-6 rounded-2xl bg-neutral-950 p-4 ring-1 ring-neutral-800">
-                <div className="flex items-center justify-between gap-3">
-                  <div className="text-sm text-neutral-300">
-                    Código:{" "}
-                    <span className="font-semibold text-neutral-50">
-                      {receiveState.code}
-                    </span>
-                  </div>
+                <div className="mb-3 text-sm text-neutral-300">
+                  Codigo: <span className="font-semibold text-neutral-50">{receiveState.code}</span>
+                </div>
 
-                  <div className="flex gap-2">
-                    {receivedIsUrl && (
-                      <a
-                        href={receiveState.text.trim()}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="rounded-xl bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500"
+                {!!receiveState.links.length && (
+                  <div className="space-y-3">
+                    {receiveState.links.map((link, index) => (
+                      <div
+                        key={`${link}-${index}`}
+                        className="rounded-xl bg-neutral-900 p-3 ring-1 ring-neutral-800"
                       >
-                        Abrir enlace
-                      </a>
+                        <div className="text-sm text-neutral-200">{shortenLink(link)}</div>
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          <a
+                            href={link}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="rounded-xl bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500"
+                          >
+                            Abrir
+                          </a>
+                          <button
+                            onClick={() => void copyToClipboard(link)}
+                            className="rounded-xl bg-neutral-50 px-4 py-2 text-sm font-medium text-neutral-950"
+                          >
+                            Copiar
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {receiveState.text && (
+                  <div className="mt-4 rounded-xl bg-neutral-900 p-3 ring-1 ring-neutral-800">
+                    <button
+                      onClick={() => setReceiveTextOpen((prev) => !prev)}
+                      className="w-full rounded-lg bg-neutral-800 px-3 py-2 text-left text-sm font-medium text-neutral-100 hover:bg-neutral-700"
+                    >
+                      {receiveTextOpen ? "Ocultar texto" : "Mostrar texto"}
+                    </button>
+
+                    {receiveTextOpen && (
+                      <pre className="mt-3 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-xl bg-neutral-950 p-3 text-sm text-neutral-100 ring-1 ring-neutral-800">
+                        {receiveState.text}
+                      </pre>
                     )}
 
                     <button
-                      className="rounded-xl bg-neutral-50 px-4 py-2 text-sm font-medium text-neutral-950"
-                      onClick={() => copyToClipboard(receiveState.text)}
+                      className="mt-3 rounded-xl bg-neutral-50 px-4 py-2 text-sm font-medium text-neutral-950"
+                      onClick={() => void copyToClipboard(receiveState.text ?? "")}
                     >
-                      Copiar
+                      Copiar texto
                     </button>
                   </div>
-                </div>
-
-                <pre className="mt-3 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-xl bg-neutral-900 p-3 text-sm text-neutral-100 ring-1 ring-neutral-800">
-                  {receiveState.text}
-                </pre>
+                )}
               </div>
             )}
           </section>
         )}
 
-        <footer className="mt-10 text-center text-xs text-neutral-500">
-          ClipCode • MVP • Sin cuentas • Expira automático
+        <footer className="mt-8 text-center text-xs text-neutral-500">
+          ClipCode | MVP PRO | Sin cuentas | Expira automatico
         </footer>
       </div>
 
-      {/* Toast flotante */}
       {toast && (
         <div className="fixed bottom-6 left-1/2 z-50 -translate-x-1/2 rounded-2xl bg-neutral-900 px-4 py-2 text-sm text-neutral-100 shadow-lg ring-1 ring-neutral-700">
           {toast}

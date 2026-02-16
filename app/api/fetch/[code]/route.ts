@@ -2,9 +2,10 @@ import { NextResponse } from "next/server";
 import { redis } from "@/lib/redis";
 
 type StoredPayload =
-  | { text: string; createdAt?: number; reads?: number }
+  | { links?: string[]; text?: string; createdAt?: number; reads?: number }
   | string
   | null;
+type RateLimitError = Error & { resetSeconds?: number };
 
 /**
  * Rate limit PRO (serverless-safe) usando Redis.
@@ -28,8 +29,8 @@ async function rateLimitOrThrow(params: {
   const resetSeconds = ttl > 0 ? ttl : params.windowSeconds;
 
   if (count > params.limit) {
-    const err = new Error("RATE_LIMIT");
-    (err as any).resetSeconds = resetSeconds;
+    const err = new Error("RATE_LIMIT") as RateLimitError;
+    err.resetSeconds = resetSeconds;
     throw err;
   }
 
@@ -76,13 +77,16 @@ export async function GET(
 
     if (!raw) {
       return NextResponse.json(
-        { error: "Code not found or expired" },
+        {
+          error:
+            "Code not found. It may have expired or was already consumed. Generate a new code and try again.",
+        },
         { status: 404 }
       );
     }
 
     // ✅ Normalizar payload (puede venir como string JSON o como objeto)
-    let payload: { text?: string } = {};
+    let payload: { links?: string[]; text?: string } = {};
     if (typeof raw === "string") {
       try {
         payload = JSON.parse(raw);
@@ -90,12 +94,22 @@ export async function GET(
         payload = { text: raw }; // fallback: tratar string como texto directo
       }
     } else {
-      payload = raw as any;
+      payload = raw;
     }
 
-    if (!payload?.text) {
+    const links = Array.isArray(payload?.links)
+      ? payload.links
+          .map((value) => String(value ?? "").trim())
+          .filter(Boolean)
+      : [];
+    const text = String(payload?.text ?? "").trim();
+
+    if (!links.length && !text) {
       return NextResponse.json(
-        { error: "Code not found or expired" },
+        {
+          error:
+            "Code not found. It may have expired or was already consumed. Generate a new code and try again.",
+        },
         { status: 404 }
       );
     }
@@ -105,13 +119,14 @@ export async function GET(
 
     return NextResponse.json({
       code,
-      text: payload.text,
+      links,
+      text: text || undefined,
       consumed: true,
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     // ✅ Rate limit error
-    if (error?.message === "RATE_LIMIT") {
-      const resetSeconds = Number(error?.resetSeconds ?? 60);
+    if (error instanceof Error && error.message === "RATE_LIMIT") {
+      const resetSeconds = Number((error as RateLimitError).resetSeconds ?? 60);
 
       return NextResponse.json(
         {

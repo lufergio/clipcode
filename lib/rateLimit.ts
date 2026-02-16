@@ -1,4 +1,5 @@
 import { redis } from "./redis";
+type RateLimitError = Error & { resetSeconds?: number };
 
 /**
  * Rate limit PRO (serverless-safe) usando Redis.
@@ -26,8 +27,8 @@ async function rateLimitOrThrow(params: {
 
   // Si supera el límite, lanzamos error controlado
   if (count > params.limit) {
-    const err = new Error("RATE_LIMIT");
-    (err as any).resetSeconds = resetSeconds;
+    const err = new Error("RATE_LIMIT") as RateLimitError;
+    err.resetSeconds = resetSeconds;
     throw err;
   }
 
