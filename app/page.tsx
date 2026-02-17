@@ -48,6 +48,7 @@ type ReceivedHistoryItem = {
   text?: string;
   sourceDeviceLabel?: string;
   receivedAt: number;
+  repeatCount: number;
 };
 
 const TTL_OPTIONS = [
@@ -922,9 +923,39 @@ export default function HomePage() {
       text: normalizedText || undefined,
       sourceDeviceLabel: normalizeDeviceLabel(item.sourceDeviceLabel) || undefined,
       receivedAt: Date.now(),
+      repeatCount: 1,
     };
 
-    setReceiveHistory((prev) => [entry, ...prev].slice(0, 40));
+    const signature = JSON.stringify({
+      links: normalizedLinks,
+      text: normalizedText || "",
+      sourceDeviceLabel: entry.sourceDeviceLabel || "",
+    });
+
+    setReceiveHistory((prev) => {
+      const matchIndex = prev.findIndex((historyItem) => {
+        const historySignature = JSON.stringify({
+          links: historyItem.links,
+          text: historyItem.text || "",
+          sourceDeviceLabel: historyItem.sourceDeviceLabel || "",
+        });
+        return historySignature === signature;
+      });
+
+      if (matchIndex === -1) {
+        return [entry, ...prev].slice(0, 40);
+      }
+
+      const existing = prev[matchIndex];
+      const merged: ReceivedHistoryItem = {
+        ...existing,
+        code: normalizedCode,
+        receivedAt: Date.now(),
+        repeatCount: (existing.repeatCount || 1) + 1,
+      };
+      const next = prev.filter((_, index) => index !== matchIndex);
+      return [merged, ...next].slice(0, 40);
+    });
   }
 
   async function pasteLinkAt(index: number) {
@@ -1828,6 +1859,11 @@ export default function HomePage() {
                         <span>
                           Codigo: <span className="font-semibold text-slate-200">{entry.code}</span>
                         </span>
+                        {entry.repeatCount > 1 && (
+                          <span className="rounded-md border border-cyan-300/30 bg-cyan-400/15 px-1.5 py-0.5 text-[10px] font-semibold text-cyan-100">
+                            x{entry.repeatCount}
+                          </span>
+                        )}
                         <span>
                           {new Date(entry.receivedAt).toLocaleTimeString([], {
                             hour: "2-digit",
