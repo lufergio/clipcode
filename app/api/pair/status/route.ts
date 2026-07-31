@@ -67,11 +67,19 @@ export async function GET(req: Request) {
       return NextResponse.json({ linked: false }, { status: 200 });
     }
 
+    let receiverDeviceLabel = pair.receiverDeviceLabel;
+    if (pair.receiverDeviceId) {
+      const storedLabel = await redis.get<string>(`clipcode:device:label:${pair.receiverDeviceId}`);
+      if (storedLabel) {
+        receiverDeviceLabel = normalizeDeviceLabel(storedLabel) || receiverDeviceLabel;
+      }
+    }
+
     return NextResponse.json(
       {
         linked: true,
         receiverDeviceId: pair.receiverDeviceId,
-        receiverDeviceLabel: pair.receiverDeviceLabel,
+        receiverDeviceLabel,
       },
       { status: 200 }
     );

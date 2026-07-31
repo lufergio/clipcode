@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { QRCodeCanvas } from "qrcode.react";
@@ -78,6 +78,12 @@ function isHttpUrl(value: string): boolean {
   } catch {
     return false;
   }
+}
+
+function extractUrls(text: string): string[] {
+  const urlRegex = /https?:\/\/[^\s<>"'\(\)]+/gi;
+  const matches = text.match(urlRegex) || [];
+  return Array.from(new Set(matches.map((url) => url.trim())));
 }
 
 function normalizeCode(value: string, maxLength: number): string {
@@ -331,6 +337,49 @@ export default function HomePage() {
   const sendTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const receiveInputRef = useRef<HTMLInputElement | null>(null);
 
+  const [rememberPairing, setRememberPairing] = useState(true);
+  const [isEditingDeviceLabel, setIsEditingDeviceLabel] = useState(false);
+  const [activeQrModal, setActiveQrModal] = useState<{
+    value: string;
+    title: string;
+    subtitle?: string;
+    pinCode?: string;
+  } | null>(null);
+  const [qrCountdown, setQrCountdown] = useState<number>(10);
+  const qrTimerRef = useRef<number | null>(null);
+
+  function openQrModal(params: {
+    value: string;
+    title: string;
+    subtitle?: string;
+    pinCode?: string;
+  }) {
+    if (qrTimerRef.current) {
+      window.clearInterval(qrTimerRef.current);
+    }
+    setActiveQrModal(params);
+    setQrCountdown(10);
+
+    qrTimerRef.current = window.setInterval(() => {
+      setQrCountdown((prev) => {
+        if (prev <= 1) {
+          if (qrTimerRef.current) window.clearInterval(qrTimerRef.current);
+          setActiveQrModal(null);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+  }
+
+  function closeQrModal() {
+    if (qrTimerRef.current) {
+      window.clearInterval(qrTimerRef.current);
+      qrTimerRef.current = null;
+    }
+    setActiveQrModal(null);
+  }
+
   function showToast(message: string) {
     setToast(message);
 
@@ -391,6 +440,13 @@ export default function HomePage() {
     if (typeof window !== "undefined") {
       localStorage.setItem(DEVICE_LABEL_STORAGE_KEY, resolved);
     }
+    if (deviceId) {
+      void fetch("/api/device/label", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ deviceId, deviceLabel: resolved }),
+      });
+    }
   }
 
   const cleanedLinks = useMemo(
@@ -447,17 +503,21 @@ export default function HomePage() {
         receiverDeviceId: pairedReceiver.receiverDeviceId,
         receiverDeviceLabel: pairedReceiver.receiverDeviceLabel,
       });
-    } else {
-      void fetchPairStatusOnce(resolvedDeviceId).then((linkedInfo) => {
-        if (!linkedInfo) return;
-        savePairedReceiverInfo(linkedInfo);
-        setPairState({
-          status: "linked",
-          receiverDeviceId: linkedInfo.receiverDeviceId,
-          receiverDeviceLabel: linkedInfo.receiverDeviceLabel,
-        });
-      });
     }
+
+    // Verificar siempre al recargar/iniciar si la pareja actualizó su nombre o estado
+    void fetchPairStatusOnce(resolvedDeviceId).then((linkedInfo) => {
+      if (!linkedInfo) {
+        if (!pairedReceiver) setPairState({ status: "idle" });
+        return;
+      }
+      savePairedReceiverInfo(linkedInfo);
+      setPairState({
+        status: "linked",
+        receiverDeviceId: linkedInfo.receiverDeviceId,
+        receiverDeviceLabel: linkedInfo.receiverDeviceLabel,
+      });
+    });
   }, []);
 
   useEffect(() => {
@@ -592,35 +652,28 @@ export default function HomePage() {
     setShowTextComposer(Boolean(normalizedText));
   }
 
+  const detectedLinks = useMemo(() => extractUrls(text), [text]);
+
   async function handleGenerate(payloadOverride?: { links: string[]; text?: string }) {
-    const payload = payloadOverride ?? {
-      links: cleanedLinks,
-      text: text.trim() || undefined,
-    };
+    const textValue = String((payloadOverride ? payloadOverride.text : text) ?? "").trim();
+    const manualLinks = payloadOverride ? payloadOverride.links : cleanedLinks;
+    const autoExtracted = extractUrls(textValue);
+    const combinedLinks = Array.from(
+      new Set([...manualLinks.map((v) => v.trim()).filter(Boolean), ...autoExtracted])
+    );
 
-    const links = payload.links.map((value) => value.trim()).filter(Boolean);
-    const textValue = String(payload.text ?? "").trim();
-
-    if (!links.length && !textValue) {
+    if (!combinedLinks.length && !textValue) {
       setSendState({
         status: "error",
-        message: "Agrega al menos un link o texto.",
+        message: "Escribe o pega texto, código o enlaces para compartir.",
       });
       return;
     }
 
-    if (links.length > MAX_LINKS) {
+    if (combinedLinks.length > MAX_LINKS) {
       setSendState({
         status: "error",
-        message: `Maximo ${MAX_LINKS} links por envio.`,
-      });
-      return;
-    }
-
-    if (links.some((value) => !isHttpUrl(value))) {
-      setSendState({
-        status: "error",
-        message: "Corrige los links invalidos (solo http/https).",
+        message: `Máximo ${MAX_LINKS} enlaces por envío.`,
       });
       return;
     }
@@ -629,7 +682,7 @@ export default function HomePage() {
 
     try {
       debugTrace("share:request", {
-        linksCount: links.length,
+        linksCount: combinedLinks.length,
         hasText: Boolean(textValue),
         ttlSeconds,
         senderDeviceId: deviceId || null,
@@ -638,7 +691,7 @@ export default function HomePage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          links,
+          links: combinedLinks,
           text: textValue || undefined,
           ttlSeconds,
           senderDeviceId: deviceId || undefined,
@@ -653,25 +706,15 @@ export default function HomePage() {
         nearbyReason?: string;
         error?: string;
       };
-      debugTrace("share:response", {
-        ok: res.ok,
-        status: res.status,
-        code: data.code ?? null,
-        expiresIn: data.expiresIn ?? null,
-        nearbyQueued: data.nearbyQueued ?? null,
-        nearbyReason: data.nearbyReason ?? null,
-        error: data.error ?? null,
-      });
 
       if (!res.ok) {
         setSendState({
           status: "error",
-          message: data?.error ?? "Error al generar el codigo.",
+          message: data?.error ?? "Error al generar el código.",
         });
         return;
       }
 
-      applyPayloadToComposer({ links, text: textValue || undefined });
       setSendState({
         status: "success",
         code: String(data.code ?? ""),
@@ -682,13 +725,12 @@ export default function HomePage() {
       if (deviceId && data.nearbyQueued === false) {
         const nearbyMessage =
           data.nearbyReason === "not_paired"
-            ? "Codigo generado. Buscar cerca no activo: falta vincular dispositivos."
-            : "Codigo generado. Buscar cerca no activo para este envio.";
+            ? "Código generado. Vinculación no activa en el receptor."
+            : "Código generado.";
         showToast(nearbyMessage);
       } else {
-        showToast("Codigo generado");
+        showToast("¡Código generado con éxito!");
       }
-
     } catch (error: unknown) {
       debugTrace("share:error", {
         error: error instanceof Error ? error.message : String(error),
@@ -750,13 +792,25 @@ export default function HomePage() {
         return;
       }
 
+      const pairCodeStr = String(data.pairCode ?? "");
       setPairingCode({
-        code: String(data.pairCode ?? ""),
+        code: pairCodeStr,
         expiresIn: Number(data.expiresIn ?? 600),
         createdAt: Date.now(),
       });
       setPairState({ status: "waiting" });
       startPairStatusPolling(Number(data.expiresIn ?? 600));
+
+      const generatedPairLink =
+        typeof window !== "undefined"
+          ? `${window.location.origin}/open?pair=${pairCodeStr}&auto=1`
+          : `/open?pair=${pairCodeStr}&auto=1`;
+
+      openQrModal({
+        value: generatedPairLink,
+        title: "Escanea para Vincular",
+        pinCode: pairCodeStr,
+      });
       showToast("Código de sincronización creado");
     } catch (error: unknown) {
       debugTrace("pair:create:error", {
@@ -1336,61 +1390,278 @@ export default function HomePage() {
         <div className="absolute bottom-0 left-1/3 h-72 w-72 rounded-full bg-fuchsia-500/15 blur-3xl" />
       </div>
 
-      <div className="relative mx-auto max-w-4xl px-4 py-8 sm:px-6 sm:py-10">
-        <header className="mb-7">
-          <div className="inline-flex items-center rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs font-medium text-slate-200 backdrop-blur">
-            Transferencia rapida entre dispositivos
-          </div>
-          <h1 className="mt-3 text-center text-4xl font-semibold tracking-tight text-white sm:text-5xl">
-            ClipEc
+      <div className="relative mx-auto max-w-4xl px-4 py-6 sm:px-6 sm:py-8">
+        {/* Header con Banner Unificado Integrado */}
+        <header className="mb-6 text-center">
+          <h1 className="text-4xl font-bold tracking-tight text-white sm:text-5xl">
+            ClipCode
           </h1>
-          <p className="mt-3 max-w-2xl text-sm text-slate-300 sm:text-base">
-            Comparte links y texto entre dispositivos con un codigo. Sin cuenta.
+          <p className="mt-1 text-xs font-medium text-cyan-400/90 sm:text-sm">
+            Transferencia rápida entre dispositivos
           </p>
-          {showApkDownloadButton && (
-            <div className="mt-4">
+
+          <div className="mt-3 flex flex-wrap items-center justify-center gap-2">
+            {showApkDownloadButton && (
               <a
                 href="https://github.com/lufergio/clipcode/releases/download/android-v1.0.0/app-clipec.apk"
                 target="_blank"
                 rel="noopener noreferrer"
-                className="inline-flex items-center rounded-xl bg-gradient-to-r from-cyan-300 to-blue-300 px-4 py-2 text-sm font-semibold text-slate-950 transition hover:brightness-110"
+                className="inline-flex items-center gap-1 rounded-full border border-cyan-400/30 bg-cyan-400/10 px-3 py-0.5 text-[11px] font-semibold text-cyan-200 transition hover:bg-cyan-400/20"
               >
-                Descargar APK
+                Descargar APK Android
               </a>
+            )}
+
+            <div className="flex items-center gap-1.5 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-slate-300 backdrop-blur">
+              <span className="font-semibold text-slate-400">Dispositivo:</span>
+              {isEditingDeviceLabel ? (
+                <div className="flex items-center gap-1.5">
+                  <input
+                    value={deviceLabel}
+                    onChange={(e) => setDeviceLabel(normalizeDeviceLabel(e.target.value))}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        persistDeviceLabel(deviceLabel);
+                        setIsEditingDeviceLabel(false);
+                        showToast("Nombre guardado");
+                      }
+                    }}
+                    placeholder="Nombre"
+                    autoFocus
+                    className="w-28 rounded-lg border border-cyan-400/50 bg-[#131724] px-2 py-0.5 font-medium text-white outline-none focus:border-cyan-300 sm:w-36 text-xs"
+                  />
+                  <button
+                    onClick={() => {
+                      persistDeviceLabel(deviceLabel);
+                      setIsEditingDeviceLabel(false);
+                      showToast("Nombre guardado");
+                    }}
+                    className="rounded-md bg-gradient-to-r from-cyan-400 to-blue-400 px-2 py-0.5 text-[11px] font-bold text-slate-950 hover:brightness-110 transition shadow-sm"
+                  >
+                    Guardar
+                  </button>
+                </div>
+              ) : (
+                <div className="flex items-center gap-1.5">
+                  <span className="font-bold text-white">{deviceLabel || "Mi dispositivo"}</span>
+                  <button
+                    onClick={() => setIsEditingDeviceLabel(true)}
+                    className="inline-flex items-center gap-1 rounded-md border border-white/15 bg-white/10 px-2 py-0.5 text-[10px] font-semibold text-slate-200 hover:bg-white/20 transition"
+                    title="Personalizar nombre"
+                  >
+                    ✏️ Editar
+                  </button>
+                </div>
+              )}
             </div>
-          )}
-          <div className="mt-5 rounded-2xl border border-white/10 bg-white/[0.04] p-4 shadow-2xl shadow-black/20 backdrop-blur">
-            <label className="mb-2 block text-xs font-semibold uppercase tracking-[0.12em] text-slate-300">
-              Nombre de este dispositivo
-            </label>
-            <input
-              value={deviceLabel}
-              onChange={(event) => setDeviceLabel(normalizeDeviceLabel(event.target.value))}
-              onBlur={() => persistDeviceLabel(deviceLabel)}
-              placeholder="Ej: TV Sala, iPhone Luis"
-              className="w-full rounded-xl border border-white/10 bg-[#0e1119] px-3 py-2.5 text-sm outline-none transition focus:border-cyan-300/70 focus:ring-2 focus:ring-cyan-200/20"
-            />
+          </div>
+
+          {/* Banner Unificado (ÚNICO LUGAR DONDE VIVE LA VINCULACIÓN Y DETALLES DE CÓDIGO) */}
+          <div className="mt-4 mx-auto max-w-2xl rounded-2xl border border-cyan-400/30 bg-[#0c101b]/95 p-3 text-xs backdrop-blur shadow-xl shadow-cyan-950/30">
+            {pairState.status === "linked" ? (
+              /* Dispositivo Vinculado Activo */
+              <div className="space-y-2">
+                <div className="flex flex-wrap items-center justify-between gap-2 px-2 py-1">
+                  <div className="flex items-center gap-2 text-emerald-300 font-semibold text-sm">
+                    <span className="relative flex h-2.5 w-2.5">
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                      <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500"></span>
+                    </span>
+                    <span>Vinculado con: <strong className="text-white">{pairState.receiverDeviceLabel || "Dispositivo remoto"}</strong></span>
+                  </div>
+                  <button
+                    onClick={() => void handleUnlinkPair()}
+                    disabled={isUnlinkingPair}
+                    className="rounded-xl border border-emerald-400/30 bg-emerald-400/10 px-3.5 py-1.5 text-xs font-semibold text-emerald-200 hover:bg-emerald-400/20 transition disabled:opacity-60"
+                  >
+                    {isUnlinkingPair ? "..." : "Desvincular"}
+                  </button>
+                </div>
+
+                {/* Código de Clip informativo durante estado de vinculación */}
+                {sendState.status === "success" && (
+                  <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-cyan-400/20 bg-cyan-400/10 p-2 px-3 text-xs">
+                    <div className="flex items-center gap-2">
+                      <span className="rounded-md border border-cyan-400/40 bg-cyan-400/20 px-1.5 py-0.5 text-[10px] font-bold text-cyan-200 uppercase">
+                        Informativo
+                      </span>
+                      <span className="text-slate-300">Código:</span>
+                      <span className="font-mono text-base font-black tracking-widest text-cyan-300">
+                        {sendState.code}
+                      </span>
+                      <span className="text-[10px] text-slate-400">({expiresLabel})</span>
+                    </div>
+
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        onClick={() => void copyToClipboard(sendState.code)}
+                        className="rounded-lg bg-gradient-to-r from-cyan-300 to-blue-300 px-2 py-1 text-[11px] font-bold text-slate-950 hover:brightness-110 transition"
+                      >
+                        Copiar
+                      </button>
+                      <button
+                        onClick={() => void copyToClipboard(shareLink)}
+                        className="rounded-lg border border-white/15 bg-white/10 px-2 py-1 text-[11px] font-semibold text-slate-200 hover:bg-white/15 transition"
+                      >
+                        Enlace
+                      </button>
+                      <button
+                        onClick={() =>
+                          openQrModal({
+                            value: shareLink || sendState.code,
+                            title: "Código QR de Clip",
+                            subtitle: `Código: ${sendState.code}`,
+                          })
+                        }
+                        className="rounded-lg border border-cyan-400/30 bg-cyan-400/10 px-2 py-1 text-[11px] font-semibold text-cyan-200 hover:bg-cyan-400/20 transition"
+                      >
+                        📱 QR (10s)
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            ) : sendState.status === "success" ? (
+              /* Muestra el Código Generado directamente en el Banner */
+              <div className="flex flex-wrap items-center justify-between gap-2 px-2 py-1">
+                <div className="flex items-center gap-2">
+                  <span className="text-slate-400">Código de Clip:</span>
+                  <span className="font-mono text-xl font-black tracking-widest text-cyan-300">
+                    {sendState.code}
+                  </span>
+                  <span className="text-[10px] text-slate-400">({expiresLabel})</span>
+                </div>
+
+                <div className="flex items-center gap-1.5">
+                  <button
+                    onClick={() => void copyToClipboard(sendState.code)}
+                    className="rounded-lg bg-gradient-to-r from-cyan-300 to-blue-300 px-2.5 py-1 text-[11px] font-bold text-slate-950 hover:brightness-110 transition"
+                  >
+                    Copiar
+                  </button>
+                  <button
+                    onClick={() => void copyToClipboard(shareLink)}
+                    className="rounded-lg border border-white/15 bg-white/10 px-2.5 py-1 text-[11px] font-semibold text-slate-200 hover:bg-white/15 transition"
+                  >
+                    Enlace
+                  </button>
+                  <button
+                    onClick={() =>
+                      openQrModal({
+                        value: shareLink || sendState.code,
+                        title: "Código QR de Clip",
+                        subtitle: `Código: ${sendState.code}`,
+                      })
+                    }
+                    className="rounded-lg border border-cyan-400/30 bg-cyan-400/10 px-2 py-1 text-[11px] font-semibold text-cyan-200 hover:bg-cyan-400/20 transition"
+                  >
+                    📱 QR (10s)
+                  </button>
+                  <button
+                    onClick={() => setSendState({ status: "idle" })}
+                    className="ml-1 text-slate-400 hover:text-white transition text-sm font-bold"
+                    title="Nuevo Envió"
+                  >
+                    ✕
+                  </button>
+                </div>
+              </div>
+            ) : (
+              /* Proceso de Vinculación (Generar PIN / Ingresar PIN) */
+              <div className="grid gap-3 sm:grid-cols-2 items-center divide-y sm:divide-y-0 sm:divide-x divide-white/10">
+                {/* Botón 1: Generar PIN */}
+                <div className="flex items-center justify-between gap-2 pr-0 sm:pr-2 pt-1 sm:pt-0">
+                  <button
+                    onClick={async () => {
+                      await handleCreatePairCode();
+                    }}
+                    className="rounded-xl bg-gradient-to-r from-cyan-400 to-blue-400 px-3.5 py-1.5 text-xs font-bold text-slate-950 hover:brightness-110 transition shadow-md"
+                  >
+                    Generar PIN
+                  </button>
+
+                  {pairingCode ? (
+                    <div className="flex items-center gap-1.5 rounded-xl border border-cyan-400/40 bg-cyan-400/15 px-2.5 py-1 font-mono text-xs font-bold text-cyan-200">
+                      <span>PIN:</span>
+                      <span className="tracking-widest text-sm text-cyan-300 font-extrabold">{pairingCode.code}</span>
+                      <button
+                        onClick={() => void copyToClipboard(pairingCode.code)}
+                        className="rounded-lg border border-cyan-400/30 bg-cyan-400/10 p-1 text-cyan-200 hover:bg-cyan-400/25 hover:text-white transition active:scale-95"
+                        title="Copiar PIN"
+                      >
+                        <CopyIcon />
+                      </button>
+                      <button
+                        onClick={() => {
+                          const pairLink =
+                            typeof window !== "undefined"
+                              ? `${window.location.origin}/open?pair=${pairingCode.code}&auto=1`
+                              : `/open?pair=${pairingCode.code}&auto=1`;
+                          openQrModal({
+                            value: pairLink,
+                            title: "Escanea para Vincular",
+                            pinCode: pairingCode.code,
+                          });
+                        }}
+                        className="inline-flex items-center gap-1 rounded-lg border border-cyan-400/30 bg-cyan-400/10 px-2 py-0.5 text-[11px] font-semibold text-cyan-200 hover:bg-cyan-400/25 hover:text-white transition active:scale-95"
+                        title="Abrir QR de nuevo"
+                      >
+                        <span>📱 QR</span>
+                      </button>
+                    </div>
+                  ) : (
+                    <span className="text-[11px] text-slate-400 italic">Dispositivo A</span>
+                  )}
+                </div>
+
+                {/* Botón 2: Escribir PIN y Vincular */}
+                <div className="flex items-center justify-between gap-1.5 pl-0 sm:pl-3 pt-2 sm:pt-0">
+                  <div className="flex items-center gap-1.5 w-full">
+                    <input
+                      value={pairCodeInput}
+                      onChange={(e) => onPairCodeChange(e.target.value)}
+                      inputMode="numeric"
+                      maxLength={6}
+                      placeholder="PIN (6 dígitos)"
+                      className="w-full rounded-xl border border-white/10 bg-[#131724] px-2.5 py-1.5 text-center font-mono text-xs text-white placeholder:text-slate-500 outline-none focus:border-cyan-400 transition"
+                    />
+                    <button
+                      onClick={() => void handleConfirmPair()}
+                      disabled={pairCodeInput.length !== 6 || pairState.status === "linking"}
+                      className={clsx(
+                        "rounded-xl px-3 py-1.5 text-xs font-bold transition whitespace-nowrap",
+                        pairCodeInput.length === 6
+                          ? "bg-gradient-to-r from-emerald-400 to-teal-400 text-slate-950 shadow-lg shadow-emerald-500/20 animate-bounce cursor-pointer"
+                          : "bg-white/10 text-slate-400 opacity-60 cursor-not-allowed"
+                      )}
+                    >
+                      {pairState.status === "linking" ? "..." : "Vincular"}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         </header>
 
         <div className="mb-6 flex rounded-2xl border border-white/10 bg-white/[0.04] p-1 backdrop-blur">
           <button
             className={clsx(
-              "flex-1 rounded-xl px-4 py-3 text-base font-semibold transition",
+              "flex-1 rounded-xl px-4 py-2.5 text-sm font-semibold transition",
               tab === "send"
-                ? "bg-gradient-to-r from-cyan-300 to-blue-300 text-slate-950"
-                : "text-slate-200 hover:bg-white/10"
+                ? "bg-gradient-to-r from-cyan-300 to-blue-300 text-slate-950 shadow-lg shadow-cyan-500/20"
+                : "text-slate-300 hover:bg-white/10"
             )}
             onClick={() => setTab("send")}
           >
-            Enviar
+            Enviar / Crear Clip
           </button>
           <button
             className={clsx(
-              "flex-1 rounded-xl px-4 py-3 text-base font-semibold transition",
+              "flex-1 rounded-xl px-4 py-2.5 text-sm font-semibold transition",
               tab === "receive"
-                ? "bg-gradient-to-r from-cyan-300 to-blue-300 text-slate-950"
-                : "text-slate-200 hover:bg-white/10"
+                ? "bg-gradient-to-r from-cyan-300 to-blue-300 text-slate-950 shadow-lg shadow-cyan-500/20"
+                : "text-slate-300 hover:bg-white/10"
             )}
             onClick={() => setTab("receive")}
           >
@@ -1398,382 +1669,152 @@ export default function HomePage() {
           </button>
         </div>
 
-        {pairState.status === "linked" && (
-          <div className="mb-6 rounded-xl border border-emerald-400/35 bg-emerald-400/10 px-4 py-3 text-sm text-emerald-100">
-            Vinculado con{" "}
-            <span className="font-semibold">
-              {pairState.receiverDeviceLabel || "dispositivo remoto"}
-            </span>
-            . Buscar cerca activo.
-            <button
-              onClick={() => void handleUnlinkPair()}
-              disabled={isUnlinkingPair}
-              className="ml-3 rounded-lg border border-emerald-300/30 bg-emerald-400/20 px-3 py-1 text-xs font-medium text-emerald-100 hover:bg-emerald-400/30 disabled:opacity-60"
-            >
-              {isUnlinkingPair ? "Desvinculando..." : "Desvincular"}
-            </button>
-          </div>
-        )}
-        {pairState.status === "waiting" && (
-          <div className="mb-6 rounded-xl border border-cyan-300/35 bg-cyan-400/10 px-4 py-3 text-sm text-cyan-100">
-            <span className="inline-block animate-pulse">
-              Esperando dispositivo para completar vinculacion...
-            </span>
-          </div>
-        )}
-
         {tab === "send" && (
-          <section className="rounded-3xl border border-white/10 bg-white/[0.04] p-5 shadow-2xl shadow-black/20 backdrop-blur sm:p-6">
-            <h2 className="text-xl font-semibold text-white">Enviar contenido</h2>
-            <p className="mt-1 text-sm text-slate-300">
-              Hasta 10 links por envio. Se consume una sola vez al recibir.
-            </p>
-
-            <div className="mt-4 space-y-3">
-              {linkInputs.map((value, index) => {
-                const invalid = invalidLinkIndexes.includes(index);
-                return (
-                  <div key={`link-${index}`} className="flex items-center gap-2">
-                    <input
-                      value={value}
-                      onChange={(event) => {
-                        const next = [...linkInputs];
-                        next[index] = event.target.value;
-                        setLinkInputs(next);
-                      }}
-                      placeholder={`https://example.com/${index + 1}`}
-                      className={clsx(
-                        "w-full rounded-xl border px-4 py-3 text-base outline-none transition",
-                        invalid
-                          ? "border-rose-500/90 bg-rose-500/10 focus:ring-2 focus:ring-rose-300/30"
-                          : "border-white/10 bg-[#0d1018] focus:border-cyan-300/70 focus:ring-2 focus:ring-cyan-200/20"
-                      )}
-                    />
-                    <button
-                      type="button"
-                      title="Pegar"
-                      aria-label={`Pegar link ${index + 1}`}
-                      onClick={() => void pasteLinkAt(index)}
-                      className="inline-flex h-10 w-10 items-center justify-center rounded-xl border border-cyan-200/30 bg-cyan-400/15 text-cyan-100 transition hover:bg-cyan-400/25"
-                    >
-                      <PasteIcon />
-                    </button>
-                    <button
-                      type="button"
-                      title="Borrar"
-                      aria-label={`Borrar link ${index + 1}`}
-                      onClick={() => clearLinkAt(index)}
-                      className="inline-flex h-10 w-10 items-center justify-center rounded-xl border border-rose-300/30 bg-rose-400/15 text-rose-100 transition hover:bg-rose-400/25"
-                    >
-                      <TrashIcon />
-                    </button>
-                  </div>
-                );
-              })}
-            </div>
-
-            <div className="mt-3 flex flex-wrap gap-2">
-              <button
-                onClick={() => {
-                  if (!canAddLinkInput) return;
-                  setLinkInputs((prev) => [...prev, ""]);
-                }}
-                disabled={!canAddLinkInput}
-                className="rounded-xl border border-white/10 bg-white/10 px-4 py-2 text-sm font-medium text-slate-100 transition hover:bg-white/15 disabled:opacity-60"
-              >
-                Agregar link
-              </button>
-
-              <button
-                onClick={() => setShowTextComposer((prev) => !prev)}
-                className="rounded-xl border border-white/10 bg-white/10 px-4 py-2 text-sm font-medium text-slate-100 transition hover:bg-white/15"
-              >
-                {showTextComposer ? "Ocultar texto" : "Agregar texto"}
-              </button>
-            </div>
-
-            {showTextComposer && (
-              <div className="mt-4">
-                <div className="mb-2 flex items-center justify-between gap-2">
-                  <label className="block text-sm font-medium text-slate-200">
-                    Texto (opcional)
-                  </label>
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      title="Pegar texto"
-                      aria-label="Pegar texto"
-                      onClick={() => void pasteTextComposer()}
-                      className="inline-flex h-9 items-center gap-1 rounded-xl border border-cyan-200/30 bg-cyan-400/15 px-3 text-xs font-medium text-cyan-100 transition hover:bg-cyan-400/25"
-                    >
-                      <PasteIcon />
-                      <TextIcon />
-                    </button>
-                    <button
-                      type="button"
-                      title="Borrar texto"
-                      aria-label="Borrar texto"
-                      onClick={clearTextComposer}
-                      className="inline-flex h-9 items-center justify-center rounded-xl border border-rose-300/30 bg-rose-400/15 px-3 text-xs font-medium text-rose-100 transition hover:bg-rose-400/25"
-                    >
-                      <TrashIcon />
-                    </button>
-                  </div>
-                </div>
-                <textarea
-                  ref={sendTextareaRef}
-                  value={text}
-                  onChange={(event) => setText(event.target.value)}
-                  className="h-28 w-full resize-none rounded-xl border border-white/10 bg-[#0d1018] p-3 text-sm outline-none transition focus:border-cyan-300/70 focus:ring-2 focus:ring-cyan-200/20"
-                  placeholder="Notas, codigo, instrucciones..."
-                />
-              </div>
-            )}
-
-            <div className="mt-4 grid gap-3 md:grid-cols-2">
-              <div>
-                <label className="mb-2 block text-sm font-medium text-slate-200">
-                  Expiracion
-                </label>
-                <select
-                  value={ttlSeconds}
-                  onChange={(event) => setTtlSeconds(Number(event.target.value))}
-                  className="w-full rounded-xl border border-white/10 bg-[#0d1018] px-4 py-3 text-base outline-none transition focus:border-cyan-300/70 focus:ring-2 focus:ring-cyan-200/20"
-                >
-                  {TTL_OPTIONS.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <label className="mb-2 block text-sm font-medium text-slate-200">
-                  Código de sincronización (enviar a dispositivo vinculado)
-                </label>
-                <div className="flex gap-2">
-                  <input
-                    value={pairCodeInput}
-                    onChange={(event) => onPairCodeChange(event.target.value)}
-                    inputMode="numeric"
-                    pattern="[0-9]*"
-                    placeholder="123456"
-                    className="w-full rounded-xl border border-white/10 bg-[#0d1018] px-4 py-3 text-center text-lg tracking-widest outline-none transition focus:border-cyan-300/70 focus:ring-2 focus:ring-cyan-200/20"
-                  />
+          <section className="space-y-6">
+            {/* ShareText.io Style Editor Card */}
+            <div className="rounded-3xl border border-white/10 bg-[#0d1017] shadow-2xl shadow-black/40 overflow-hidden backdrop-blur">
+              {/* Action Toolbar */}
+              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 bg-white/[0.03] px-4 py-3 sm:px-6">
+                <div className="flex flex-wrap items-center gap-2">
                   <button
-                    onClick={() => void handleConfirmPair()}
-                    disabled={pairState.status === "linking"}
-                    className="rounded-xl bg-gradient-to-r from-cyan-300 to-blue-300 px-4 py-2 text-sm font-semibold text-slate-950 transition hover:brightness-110 disabled:opacity-60"
+                    type="button"
+                    onClick={() => void copyToClipboard(text)}
+                    disabled={!text.trim()}
+                    className="inline-flex items-center gap-1.5 rounded-xl border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-semibold text-slate-200 transition hover:bg-white/10 disabled:opacity-40"
                   >
-                    {pairState.status === "linking" ? "Vinculando..." : "Vincular"}
+                    <CopyIcon />
+                    <span>Copiar Texto</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void pasteTextComposer()}
+                    className="inline-flex items-center gap-1.5 rounded-xl border border-cyan-400/30 bg-cyan-400/10 px-3 py-1.5 text-xs font-semibold text-cyan-200 transition hover:bg-cyan-400/20"
+                  >
+                    <PasteIcon />
+                    <span>Pegar</span>
+                  </button>
+                  {text && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setText("");
+                        setSendState({ status: "idle" });
+                      }}
+                      className="inline-flex items-center gap-1.5 rounded-xl border border-rose-400/30 bg-rose-400/10 px-3 py-1.5 text-xs font-semibold text-rose-200 transition hover:bg-rose-400/20"
+                    >
+                      <TrashIcon />
+                      <span>Limpiar</span>
+                    </button>
+                  )}
+                </div>
+
+                <div className="flex items-center gap-3">
+                  {detectedLinks.length > 0 && (
+                    <span className="rounded-full border border-cyan-400/40 bg-cyan-400/15 px-3 py-1 text-xs font-semibold text-cyan-200">
+                      {detectedLinks.length} link{detectedLinks.length > 1 ? "s" : ""} detectado{detectedLinks.length > 1 ? "s" : ""}
+                    </span>
+                  )}
+                  <button
+                    onClick={() => void handleGenerate()}
+                    disabled={sendState.status === "loading"}
+                    className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-amber-400 to-orange-400 px-4 py-2 text-xs font-bold uppercase tracking-wider text-slate-950 shadow-lg shadow-amber-500/20 transition hover:brightness-110 disabled:opacity-60"
+                  >
+                    <span>{sendState.status === "loading" ? "Enviando..." : "Enviar / Compartir"}</span>
                   </button>
                 </div>
               </div>
-            </div>
 
-            {pairState.status === "linked" && (
-              <div className="mt-3 rounded-xl border border-emerald-400/40 bg-emerald-400/10 p-3 text-sm text-emerald-100">
-                <div>
-                  Vinculado con{" "}
-                  <span className="font-semibold">
-                    {pairState.receiverDeviceLabel || "dispositivo remoto"}
-                  </span>
-                  . Buscar cerca disponible para este par.
+              {/* Large Central Textarea */}
+              <div className="p-4 sm:p-6">
+                <textarea
+                  ref={sendTextareaRef}
+                  value={text}
+                  onChange={(e) => setText(e.target.value)}
+                  placeholder="Pega o escribe tu texto, código o enlaces aquí..."
+                  rows={10}
+                  className="w-full resize-y bg-transparent text-base font-normal text-slate-100 placeholder-slate-500 outline-none leading-relaxed min-h-[220px]"
+                />
+              </div>
+
+              {/* Footer Toolbar of Card */}
+              <div className="flex flex-wrap items-center justify-between gap-3 border-t border-white/10 bg-white/[0.02] px-4 py-3 sm:px-6">
+                <div className="flex items-center gap-2 text-xs text-slate-400">
+                  <span>Expiración:</span>
+                  <select
+                    value={ttlSeconds}
+                    onChange={(e) => setTtlSeconds(Number(e.target.value))}
+                    className="rounded-lg border border-white/10 bg-[#121622] px-2.5 py-1 text-xs text-slate-200 outline-none focus:border-cyan-400"
+                  >
+                    {TTL_OPTIONS.map((opt) => (
+                      <option key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </option>
+                    ))}
+                  </select>
                 </div>
-                <button
-                  onClick={() => void handleUnlinkPair()}
-                  disabled={isUnlinkingPair}
-                  className="mt-2 rounded-lg border border-emerald-300/30 bg-emerald-400/20 px-3 py-1 text-xs font-medium text-emerald-100 hover:bg-emerald-400/30"
-                >
-                  {isUnlinkingPair ? "Desvinculando..." : "Desvincular"}
-                </button>
-              </div>
-            )}
-            {pairState.status === "error" && (
-              <div className="mt-3 rounded-xl border border-rose-400/40 bg-rose-400/10 p-3 text-sm text-rose-100">
-                {pairState.message}
-              </div>
-            )}
 
-            <div className="mt-4 flex flex-wrap gap-3">
-              <button
-                onClick={() => void handleGenerate()}
-                disabled={sendState.status === "loading"}
-                className="rounded-xl bg-gradient-to-r from-cyan-300 via-sky-300 to-blue-300 px-5 py-3 text-base font-semibold text-slate-950 shadow-lg shadow-cyan-500/20 transition hover:brightness-110 disabled:opacity-60"
-              >
-                {sendState.status === "loading" ? "Enviando..." : "Enviar"}
-              </button>
-
-              <button
-                onClick={() => {
-                  setLinkInputs(["", "", ""]);
-                  setText("");
-                  setShowTextComposer(false);
-                  setSendState({ status: "idle" });
-                }}
-                className="rounded-xl border border-white/10 bg-white/10 px-5 py-3 text-base font-medium text-slate-100 transition hover:bg-white/15"
-              >
-                Nuevo
-              </button>
+                {sendState.status === "idle" && (
+                  <button
+                    onClick={() => {
+                      setText("");
+                      setSendState({ status: "idle" });
+                    }}
+                    className="text-xs font-medium text-slate-400 hover:text-slate-200 transition"
+                  >
+                    Limpiar todo
+                  </button>
+                )}
+              </div>
             </div>
 
-            <div className="mt-2 text-xs text-slate-400">
-              {cleanedLinks.length} links listos / {MAX_LINKS}
-            </div>
-
+            {/* Error Message */}
             {sendState.status === "error" && (
-              <div className="mt-4 rounded-xl border border-rose-400/40 bg-rose-400/10 p-3 text-sm text-rose-100">
+              <div className="rounded-xl border border-rose-400/40 bg-rose-400/10 p-4 text-sm text-rose-200">
                 {sendState.message}
-              </div>
-            )}
-
-            {sendState.status === "success" && (
-              <div className="mt-6 rounded-2xl border border-white/10 bg-[#0b0f17] p-4">
-                <div className="flex flex-col items-center gap-3">
-                  <div className="text-5xl font-bold tracking-widest">{sendState.code}</div>
-                  <div className="text-sm text-slate-300">Expira en: {expiresLabel}</div>
-
-                  <div className="flex flex-wrap justify-center gap-2">
-                    <button
-                      className="rounded-xl bg-gradient-to-r from-cyan-300 to-blue-300 px-4 py-2 text-sm font-semibold text-slate-950"
-                      onClick={() => void copyToClipboard(sendState.code)}
-                    >
-                      Copiar codigo
-                    </button>
-                    <button
-                      className="rounded-xl border border-white/10 bg-white/10 px-4 py-2 text-sm font-medium text-slate-100 hover:bg-white/15"
-                      onClick={() => void copyToClipboard(shareLink)}
-                    >
-                      Copiar link
-                    </button>
-                  </div>
-
-                  <div className="rounded-2xl bg-white p-3">
-                    <QRCodeCanvas value={shareLink || sendState.code} size={180} />
-                  </div>
-                </div>
               </div>
             )}
           </section>
         )}
 
         {tab === "receive" && (
-          <section className="rounded-3xl border border-white/10 bg-white/[0.04] p-5 shadow-2xl shadow-black/20 backdrop-blur sm:p-6">
-            <h2 className="text-xl font-semibold text-white">Recibir contenido</h2>
-            <p className="mt-1 text-sm text-slate-300">
-              Puedes usar codigo manual o Buscar cerca con pairing.
-            </p>
-
-            <div className="mt-4 grid gap-3 md:grid-cols-2">
-              <button
-                onClick={() => void handleCreatePairCode()}
-                className="rounded-xl bg-gradient-to-r from-cyan-300 to-blue-300 px-5 py-3 text-base font-semibold text-slate-950 transition hover:brightness-110"
-              >
-                Vincular con código
-              </button>
-              <button
-                onClick={() => void handleNearbySearch()}
-                disabled={nearbyState.status === "searching"}
-                className="rounded-xl border border-cyan-300/30 bg-cyan-400/20 px-5 py-3 text-base font-semibold text-cyan-100 transition hover:bg-cyan-400/30 disabled:opacity-60"
-              >
-                {nearbyState.status === "searching" ? "Buscando..." : "Buscar cerca"}
-              </button>
-            </div>
-
-            {pairingCode && (
-              <div className="mt-4 rounded-2xl border border-white/10 bg-[#0b0f17] p-4">
-                <div className="flex flex-col items-center gap-3">
-                  <div className="text-sm text-slate-300">Código de sincronización</div>
-                  <div className="text-4xl font-bold tracking-widest">{pairingCode.code}</div>
-                  <div className="text-xs text-slate-400">
-                    Dispositivo: {deviceLabel || "Mi dispositivo"}
-                  </div>
-                  <div className="text-xs text-slate-400">
-                    Expira en {Math.ceil(pairingCode.expiresIn / 60)} min
-                  </div>
-                  <div className="rounded-2xl bg-white p-3">
-                    <QRCodeCanvas value={pairLink || pairingCode.code} size={180} />
-                  </div>
+          <section className="space-y-6">
+            {/* Animación indicando vinculación si no está vinculado */}
+            {pairState.status !== "linked" ? (
+              <div className="rounded-3xl border border-amber-400/40 bg-amber-500/10 p-6 text-center shadow-xl space-y-3 animate-pulse">
+                <div className="inline-flex items-center justify-center h-12 w-12 rounded-full bg-amber-400/20 text-amber-300 text-2xl font-bold animate-bounce">
+                  ↑
+                </div>
+                <h3 className="text-lg font-bold text-white">Dispositivo No Vinculado</h3>
+                <p className="max-w-md mx-auto text-xs text-amber-100/90 leading-relaxed">
+                  Para recibir contenido en tiempo real de tu otro dispositivo, **genera o ingresa el PIN de 6 dígitos en el Banner Superior** ↑.
+                </p>
+              </div>
+            ) : (
+              <div className="rounded-3xl border border-white/10 bg-white/[0.04] p-5 shadow-2xl backdrop-blur sm:p-6 space-y-4">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-xl font-semibold text-white">Búsqueda Directa Activa</h2>
                   <button
-                    onClick={() => void copyToClipboard(pairingCode.code)}
-                    className="rounded-xl bg-gradient-to-r from-cyan-300 to-blue-300 px-4 py-2 text-sm font-semibold text-slate-950"
+                    onClick={() => void handleNearbySearch()}
+                    disabled={nearbyState.status === "searching"}
+                    className="rounded-xl border border-cyan-300/30 bg-cyan-400/20 px-4 py-2 text-xs font-semibold text-cyan-100 hover:bg-cyan-400/30 transition disabled:opacity-60"
                   >
-                    Copiar código de sincronización
+                    {nearbyState.status === "searching" ? "Buscando..." : "Actualizar / Buscar ahora"}
                   </button>
-                  {pairState.status === "waiting" && (
-                    <div className="rounded-xl border border-cyan-300/35 bg-cyan-400/15 px-3 py-2 text-xs text-cyan-100">
-                      <span className="inline-block animate-pulse">
-                        Esperando confirmacion del otro dispositivo...
-                      </span>
-                    </div>
-                  )}
                 </div>
               </div>
             )}
 
-            {nearbyState.status === "empty" && (
-              <div className="mt-4 rounded-xl border border-amber-300/40 bg-amber-300/10 p-3 text-sm text-amber-100">
-                No se encontro nada. Verifica que hayas enviado a este dispositivo o escribe
-                el codigo manual.
-              </div>
-            )}
-            {nearbyState.status === "error" && (
-              <div className="mt-4 rounded-xl border border-rose-400/40 bg-rose-400/10 p-3 text-sm text-rose-100">
-                {nearbyState.message}
-              </div>
-            )}
-
-            <div className="mt-6 rounded-xl border border-white/10 bg-[#0b0f17] p-4">
-              <h3 className="text-sm font-semibold text-slate-200">Modo manual por codigo</h3>
-              <input
-                ref={receiveInputRef}
-                value={codeInput}
-                onChange={(event) => onCodeChange(event.target.value)}
-                className="mt-3 w-full rounded-xl border border-white/10 bg-[#101522] p-3 text-center text-2xl tracking-widest outline-none transition focus:border-cyan-300/70 focus:ring-2 focus:ring-cyan-200/20"
-                placeholder="12345"
-                inputMode="numeric"
-                pattern="[0-9]*"
-              />
-              <div className="mt-3 flex gap-2">
-                <button
-                  onClick={() => void handleFetch()}
-                  disabled={receiveState.status === "loading"}
-                  className="rounded-xl bg-gradient-to-r from-cyan-300 to-blue-300 px-4 py-2 text-sm font-semibold text-slate-950 transition hover:brightness-110 disabled:opacity-60"
-                >
-                  {receiveState.status === "loading" ? "Buscando..." : "Recibir"}
-                </button>
-                <button
-                  onClick={() => {
-                    setCodeInput("");
-                    setReceiveState({ status: "idle" });
-                  }}
-                  className="rounded-xl border border-white/10 bg-white/10 px-4 py-2 text-sm font-medium text-slate-100 transition hover:bg-white/15"
-                >
-                  Limpiar
-                </button>
-              </div>
-            </div>
-
             {receiveState.status === "error" && (
-              <div className="mt-4 rounded-xl border border-rose-400/40 bg-rose-400/10 p-3 text-sm text-rose-100">
+              <div className="rounded-xl border border-rose-400/40 bg-rose-400/10 p-3 text-sm text-rose-100">
                 {receiveState.message}
               </div>
             )}
 
             {receiveState.status === "success" && (
-              <div className="mt-6 rounded-2xl border border-white/10 bg-[#0b0f17] p-4">
-                <div className="mb-3 text-sm text-slate-300">
-                  Codigo: <span className="font-semibold text-slate-100">{receiveState.code}</span>
+              <div className="rounded-2xl border border-white/10 bg-[#0b0f17] p-4 space-y-4">
+                <div className="text-sm text-slate-300">
+                  Código: <span className="font-semibold text-slate-100">{receiveState.code}</span>
                 </div>
-                {receiveState.sourceDeviceLabel && (
-                  <div className="mb-3 text-sm text-slate-300">
-                    Enviado desde:{" "}
-                    <span className="font-semibold text-slate-100">
-                      {receiveState.sourceDeviceLabel}
-                    </span>
-                  </div>
-                )}
 
                 {!!receiveState.links.length && (
                   <div className="space-y-3">
@@ -1788,18 +1829,14 @@ export default function HomePage() {
                             href={link}
                             target="_blank"
                             rel="noopener noreferrer"
-                            title="Abrir link"
-                            aria-label="Abrir link"
-                            className="inline-flex items-center gap-2 rounded-xl border border-cyan-300/30 bg-cyan-400/20 px-4 py-2 text-sm font-medium text-cyan-100 transition hover:bg-cyan-400/30"
+                            className="inline-flex items-center gap-2 rounded-xl border border-cyan-300/30 bg-cyan-400/20 px-4 py-2 text-xs font-medium text-cyan-100 hover:bg-cyan-400/30"
                           >
                             <OpenIcon />
                             <span>Abrir</span>
                           </a>
                           <button
                             onClick={() => void copyToClipboard(link)}
-                            title="Copiar link"
-                            aria-label="Copiar link"
-                            className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-cyan-300 to-blue-300 px-4 py-2 text-sm font-semibold text-slate-950"
+                            className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-cyan-300 to-blue-300 px-4 py-2 text-xs font-semibold text-slate-950"
                           >
                             <CopyIcon />
                             <span>Copiar</span>
@@ -1811,22 +1848,12 @@ export default function HomePage() {
                 )}
 
                 {receiveState.text && (
-                  <div className="mt-4 rounded-xl border border-white/10 bg-[#101522] p-3">
+                  <div className="rounded-xl border border-white/10 bg-[#101522] p-3 space-y-3">
+                    <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words text-sm text-slate-100">
+                      {receiveState.text}
+                    </pre>
                     <button
-                      onClick={() => setReceiveTextOpen((prev) => !prev)}
-                      className="w-full rounded-lg border border-white/10 bg-white/10 px-3 py-2 text-left text-sm font-medium text-slate-100 transition hover:bg-white/15"
-                    >
-                      {receiveTextOpen ? "Ocultar texto" : "Mostrar texto"}
-                    </button>
-
-                    {receiveTextOpen && (
-                      <pre className="mt-3 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-xl border border-white/10 bg-[#0b0f17] p-3 text-sm text-slate-100">
-                        {receiveState.text}
-                      </pre>
-                    )}
-
-                    <button
-                      className="mt-3 rounded-xl bg-gradient-to-r from-cyan-300 to-blue-300 px-4 py-2 text-sm font-semibold text-slate-950"
+                      className="rounded-xl bg-gradient-to-r from-cyan-300 to-blue-300 px-4 py-2 text-xs font-semibold text-slate-950"
                       onClick={() => void copyToClipboard(receiveState.text ?? "")}
                     >
                       Copiar texto
@@ -1835,100 +1862,76 @@ export default function HomePage() {
                 )}
               </div>
             )}
-
-            {!!receiveHistory.length && (
-              <div className="mt-6 rounded-2xl border border-white/10 bg-[#0b0f17] p-4">
-                <div className="mb-3 flex items-center justify-between gap-2">
-                  <h3 className="text-sm font-semibold text-slate-200">
-                    Historial recibido
-                  </h3>
-                  <button
-                    onClick={() => setReceiveHistory([])}
-                    className="rounded-lg border border-white/15 bg-white/10 px-3 py-1 text-xs font-medium text-slate-100 transition hover:bg-white/15"
-                  >
-                    Limpiar historial
-                  </button>
-                </div>
-                <div className="space-y-3">
-                  {receiveHistory.map((entry) => (
-                    <div
-                      key={entry.id}
-                      className="rounded-xl border border-white/10 bg-[#101522] p-3"
-                    >
-                      <div className="mb-2 flex flex-wrap items-center gap-2 text-xs text-slate-400">
-                        <span>
-                          Codigo: <span className="font-semibold text-slate-200">{entry.code}</span>
-                        </span>
-                        {entry.repeatCount > 1 && (
-                          <span className="rounded-md border border-cyan-300/30 bg-cyan-400/15 px-1.5 py-0.5 text-[10px] font-semibold text-cyan-100">
-                            x{entry.repeatCount}
-                          </span>
-                        )}
-                        <span>
-                          {new Date(entry.receivedAt).toLocaleTimeString([], {
-                            hour: "2-digit",
-                            minute: "2-digit",
-                          })}
-                        </span>
-                        {entry.sourceDeviceLabel && (
-                          <span>
-                            Desde:{" "}
-                            <span className="font-semibold text-slate-200">
-                              {entry.sourceDeviceLabel}
-                            </span>
-                          </span>
-                        )}
-                      </div>
-
-                      {!!entry.links.length && (
-                        <div className="space-y-2">
-                          {entry.links.map((link, index) => (
-                            <div key={`${entry.id}-${link}-${index}`}>
-                              <div className="text-sm text-slate-200">{shortenLink(link)}</div>
-                              <div className="mt-2 flex flex-wrap gap-2">
-                                <a
-                                  href={link}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  className="inline-flex items-center gap-2 rounded-xl border border-cyan-300/30 bg-cyan-400/20 px-3 py-1.5 text-xs font-medium text-cyan-100 transition hover:bg-cyan-400/30"
-                                >
-                                  <OpenIcon />
-                                  <span>Abrir</span>
-                                </a>
-                                <button
-                                  onClick={() => void copyToClipboard(link)}
-                                  className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-cyan-300 to-blue-300 px-3 py-1.5 text-xs font-semibold text-slate-950"
-                                >
-                                  <CopyIcon />
-                                  <span>Copiar</span>
-                                </button>
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-
-                      {entry.text && (
-                        <div className="mt-3 rounded-lg border border-white/10 bg-[#0b0f17] p-2 text-sm text-slate-100">
-                          <pre className="whitespace-pre-wrap break-words">{entry.text}</pre>
-                        </div>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
           </section>
         )}
 
         <footer className="mt-8 text-center text-xs text-slate-500">
-          ClipEc | MVP PRO | Sin cuentas | Expira automatico
+          ClipCode | Transferencia rápida entre dispositivos
         </footer>
       </div>
 
       {toast && (
         <div className="fixed bottom-6 left-1/2 z-50 -translate-x-1/2 rounded-2xl border border-white/15 bg-[#0d111a]/95 px-4 py-2 text-sm text-slate-100 shadow-lg shadow-black/40 backdrop-blur">
           {toast}
+        </div>
+      )}
+
+      {/* 10-Second Auto-Closing QR Modal */}
+      {activeQrModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 backdrop-blur-sm">
+          <div className="relative w-full max-w-sm rounded-3xl border border-white/15 bg-[#0d1017] p-6 shadow-2xl text-center space-y-4">
+            <button
+              onClick={closeQrModal}
+              className="absolute right-4 top-4 rounded-full border border-white/10 bg-white/5 p-1.5 text-slate-400 hover:bg-white/10 hover:text-white transition"
+              title="Cerrar"
+            >
+              <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M18 6L6 18M6 6l12 12" />
+              </svg>
+            </button>
+
+            <div className="space-y-2">
+              <h3 className="text-lg font-bold text-white">{activeQrModal.title}</h3>
+
+              {activeQrModal.pinCode ? (
+                <div className="flex items-center justify-center gap-3 rounded-2xl border border-cyan-400/30 bg-cyan-400/10 py-2 px-4 shadow-inner">
+                  <span className="text-xs text-slate-400 font-medium uppercase tracking-wider">PIN:</span>
+                  <span className="font-mono text-3xl font-black tracking-widest text-cyan-300 drop-shadow-[0_0_12px_rgba(34,211,238,0.5)]">
+                    {activeQrModal.pinCode}
+                  </span>
+                  <button
+                    onClick={() => void copyToClipboard(activeQrModal.pinCode!)}
+                    className="inline-flex items-center justify-center rounded-xl border border-cyan-400/40 bg-cyan-400/20 p-2 text-cyan-200 hover:bg-cyan-400/35 hover:text-white transition active:scale-95 shadow-sm"
+                    title="Copiar PIN"
+                  >
+                    <CopyIcon />
+                  </button>
+                </div>
+              ) : activeQrModal.subtitle ? (
+                <div className="flex items-center justify-center gap-2">
+                  <p className="text-xs text-slate-300 font-mono">{activeQrModal.subtitle}</p>
+                  <button
+                    onClick={() => void copyToClipboard(activeQrModal.value)}
+                    className="inline-flex items-center justify-center rounded-xl border border-cyan-400/30 bg-cyan-400/10 p-1.5 text-cyan-200 hover:bg-cyan-400/25 transition active:scale-95"
+                    title="Copiar"
+                  >
+                    <CopyIcon />
+                  </button>
+                </div>
+              ) : null}
+            </div>
+
+            <div className="inline-block rounded-2xl bg-white p-4 shadow-xl">
+              <QRCodeCanvas value={activeQrModal.value} size={200} />
+            </div>
+
+            <div className="flex items-center justify-center pt-1 text-xs text-slate-400">
+              <span className="flex items-center gap-1.5 text-cyan-300 font-medium">
+                <span className="inline-block h-2 w-2 rounded-full bg-cyan-400 animate-ping" />
+                Cierre automático en {qrCountdown}s
+              </span>
+            </div>
+          </div>
         </div>
       )}
     </main>
