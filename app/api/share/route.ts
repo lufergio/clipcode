@@ -5,6 +5,16 @@ import { generateNumericCode } from "@/lib/code-generator";
 const DEFAULT_TTL_SECONDS = 3600; // 60 minutos (default)
 const ALLOWED_TTLS = new Set([180, 300, 600, 1800, 3600]); // 3, 5, 10, 30, 60 min
 const MAX_TEXT_SIZE = 5_000;
+const MAX_TEXT_FILE_SIZE_BYTES = 256 * 1024;
+const MAX_FILE_NAME_LENGTH = 120;
+const ALLOWED_TEXT_FILE_EXTENSIONS = new Set([
+  "txt", "json", "sql", "md", "markdown", "csv", "tsv", "xml", "yaml", "yml",
+  "toml", "ini", "conf", "config", "log", "html", "htm", "css", "scss", "sass",
+  "less", "js", "jsx", "ts", "tsx", "mjs", "cjs", "py", "dart", "java", "kt",
+  "kts", "c", "h", "cpp", "hpp", "cc", "cs", "go", "rs", "rb", "php", "swift",
+  "sh", "bash", "zsh", "fish", "ps1", "bat", "cmd", "graphql", "gql", "prisma",
+  "vue", "svelte", "properties", "gradle",
+]);
 const MAX_LINKS = 10;
 const MAX_LINK_SIZE = 2_000;
 const PAIRING_TTL_SECONDS = 60 * 60 * 24 * 30; // 30 dias
@@ -52,13 +62,22 @@ async function rateLimitOrThrow(params: {
 type ShareRequestBody = {
   links?: unknown;
   text?: unknown;
+  file?: unknown;
   ttlSeconds?: unknown;
   senderDeviceId?: unknown;
+};
+
+type SharedTextFile = {
+  name: string;
+  content: string;
+  size: number;
+  mimeType: "text/plain";
 };
 
 type StoredClipPayload = {
   links: string[];
   text?: string;
+  file?: SharedTextFile;
   createdAt: number;
   reads: number;
 };
@@ -74,9 +93,47 @@ type NearbyPayload = {
   code: string;
   links: string[];
   text?: string;
+  file?: SharedTextFile;
   senderDeviceLabel?: string;
   createdAt: number;
 };
+
+function isAllowedTextFileName(name: string): boolean {
+  const normalized = name.toLowerCase();
+  if (normalized === "dockerfile" || normalized === "makefile" || normalized === "procfile") {
+    return true;
+  }
+  if (normalized === ".gitignore" || normalized === ".editorconfig" || normalized === ".npmrc") {
+    return true;
+  }
+  if (normalized === ".env" || normalized.startsWith(".env.")) return true;
+  const extension = normalized.includes(".") ? normalized.split(".").pop() ?? "" : "";
+  return ALLOWED_TEXT_FILE_EXTENSIONS.has(extension);
+}
+
+/** Normaliza un archivo de texto para desarrollo y preserva su contenido exacto. */
+function normalizeTextFile(value: unknown): SharedTextFile | null {
+  if (!value || typeof value !== "object") return null;
+
+  const raw = value as { name?: unknown; content?: unknown };
+  const rawName = String(raw.name ?? "")
+    .trim()
+    .replace(/[\\/\u0000-\u001f\u007f]/g, "_");
+  if (!rawName || !isAllowedTextFileName(rawName)) return null;
+  if (typeof raw.content !== "string") return null;
+
+  const suffixIndex = rawName.lastIndexOf(".");
+  const suffix = suffixIndex > 0 ? rawName.slice(suffixIndex) : "";
+  const name = rawName.length > MAX_FILE_NAME_LENGTH
+    ? `${rawName.slice(0, MAX_FILE_NAME_LENGTH - suffix.length)}${suffix}`
+    : rawName;
+  const content = raw.content;
+  const size = new TextEncoder().encode(content).byteLength;
+
+  if (size > MAX_TEXT_FILE_SIZE_BYTES) return null;
+
+  return { name, content, size, mimeType: "text/plain" };
+}
 
 type NearbyQueuePayload = {
   version: 2;
@@ -119,17 +176,19 @@ function normalizeNearbyPayload(input: unknown): NearbyPayload | null {
     ? payload!.links.map((value) => String(value ?? "").trim()).filter(Boolean)
     : [];
   const text = String(payload?.text ?? "").trim();
+  const file = normalizeTextFile(payload?.file);
   const senderDeviceLabel = String(payload?.senderDeviceLabel ?? "").trim().slice(0, 40);
   const createdAt = Number(payload?.createdAt);
 
   if (!messageId) return null;
-  if (!links.length && !text) return null;
+  if (!links.length && !text && !file) return null;
 
   return {
     messageId,
     code,
     links,
     text: text || undefined,
+    file: file || undefined,
     senderDeviceLabel: senderDeviceLabel || undefined,
     createdAt: Number.isFinite(createdAt) && createdAt > 0 ? createdAt : Date.now(),
   };
@@ -208,6 +267,8 @@ export async function POST(req: Request) {
       .filter(Boolean);
 
     const text = String(body?.text ?? "").trim();
+    const hasRawFile = body?.file !== undefined && body?.file !== null;
+    const file = normalizeTextFile(body?.file);
     const ttlCandidate = Number(body?.ttlSeconds ?? DEFAULT_TTL_SECONDS);
     const ttlSeconds = ALLOWED_TTLS.has(ttlCandidate)
       ? ttlCandidate
@@ -216,6 +277,7 @@ export async function POST(req: Request) {
     debugTrace("request", {
       linksCount: links.length,
       hasText: Boolean(text),
+      hasFile: Boolean(file),
       ttlSeconds,
       senderDeviceId: senderDeviceId || null,
     });
@@ -227,9 +289,16 @@ export async function POST(req: Request) {
       );
     }
 
-    if (!links.length && !text) {
+    if (hasRawFile && !file) {
       return NextResponse.json(
-        { error: "At least one link or text is required" },
+        { error: "Invalid text file type or file exceeds 256 KB" },
+        { status: 400 }
+      );
+    }
+
+    if (!links.length && !text && !file) {
+      return NextResponse.json(
+        { error: "At least one link, text or text file is required" },
         { status: 400 }
       );
     }
@@ -272,6 +341,7 @@ export async function POST(req: Request) {
     const payload: StoredClipPayload = {
       links,
       text,
+      file: file || undefined,
       createdAt: Date.now(),
       reads: 0,
     };
@@ -324,6 +394,7 @@ export async function POST(req: Request) {
           code,
           links,
           text: text || undefined,
+          file: file || undefined,
           senderDeviceLabel: senderDeviceLabel || undefined,
           createdAt: Date.now(),
         };

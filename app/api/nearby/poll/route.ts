@@ -2,15 +2,55 @@ import { NextResponse } from "next/server";
 import { redis } from "@/lib/redis";
 
 const DEBUG_TRACE = process.env.NODE_ENV !== "production";
+const MAX_TEXT_FILE_SIZE_BYTES = 256 * 1024;
+const ALLOWED_TEXT_FILE_EXTENSIONS = new Set([
+  "txt", "json", "sql", "md", "markdown", "csv", "tsv", "xml", "yaml", "yml",
+  "toml", "ini", "conf", "config", "log", "html", "htm", "css", "scss", "sass",
+  "less", "js", "jsx", "ts", "tsx", "mjs", "cjs", "py", "dart", "java", "kt",
+  "kts", "c", "h", "cpp", "hpp", "cc", "cs", "go", "rs", "rb", "php", "swift",
+  "sh", "bash", "zsh", "fish", "ps1", "bat", "cmd", "graphql", "gql", "prisma",
+  "vue", "svelte", "properties", "gradle",
+]);
+
+function isAllowedTextFileName(name: string): boolean {
+  const normalized = name.toLowerCase();
+  if (["dockerfile", "makefile", "procfile", ".gitignore", ".editorconfig", ".npmrc"].includes(normalized)) {
+    return true;
+  }
+  if (normalized === ".env" || normalized.startsWith(".env.")) return true;
+  const extension = normalized.includes(".") ? normalized.split(".").pop() ?? "" : "";
+  return ALLOWED_TEXT_FILE_EXTENSIONS.has(extension);
+}
 
 type NearbyPayload = {
   messageId?: string;
   code?: string;
   links?: string[];
   text?: string;
+  file?: SharedTextFile;
   senderDeviceLabel?: string;
   createdAt?: number;
 };
+
+type SharedTextFile = {
+  name: string;
+  content: string;
+  size: number;
+  mimeType: "text/plain";
+};
+
+function normalizeTextFile(value: unknown): SharedTextFile | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as { name?: unknown; content?: unknown; size?: unknown };
+  const name = String(raw.name ?? "").trim();
+  if (typeof raw.content !== "string") return null;
+  const content = raw.content;
+  const size = new TextEncoder().encode(content).byteLength;
+  if (!isAllowedTextFileName(name) || size > MAX_TEXT_FILE_SIZE_BYTES) {
+    return null;
+  }
+  return { name, content, size, mimeType: "text/plain" };
+}
 
 type NearbyQueuePayload = {
   version?: number;
@@ -41,17 +81,19 @@ function normalizeNearbyPayload(input: NearbyPayload | null | undefined): Nearby
     ? input!.links.map((value) => String(value ?? "").trim()).filter(Boolean)
     : [];
   const text = String(input?.text ?? "").trim();
+  const file = normalizeTextFile(input?.file);
   const code = String(input?.code ?? "").trim().toUpperCase();
   const messageId = normalizeMessageId(input?.messageId);
   const senderDeviceLabel = String(input?.senderDeviceLabel ?? "").trim().slice(0, 40);
 
-  if (!links.length && !text) return null;
+  if (!links.length && !text && !file) return null;
 
   return {
     messageId: messageId || undefined,
     code: code || undefined,
     links,
     text: text || undefined,
+    file: file || undefined,
     senderDeviceLabel: senderDeviceLabel || undefined,
     createdAt:
       Number.isFinite(Number(input?.createdAt)) && Number(input?.createdAt) > 0
@@ -133,6 +175,7 @@ export async function GET(req: Request) {
     const currentItem = items[0];
     const links = Array.isArray(currentItem.links) ? currentItem.links : [];
     const text = String(currentItem.text ?? "").trim();
+    const file = normalizeTextFile(currentItem.file);
     const code = String(currentItem.code ?? "").trim().toUpperCase();
     const messageId = normalizeMessageId(currentItem.messageId);
     const senderDeviceLabel = String(currentItem.senderDeviceLabel ?? "").trim().slice(0, 40);
@@ -175,6 +218,7 @@ export async function GET(req: Request) {
         code: code || undefined,
         links,
         text: text || undefined,
+        file: file || undefined,
         senderDeviceLabel: senderDeviceLabel || undefined,
       },
     });

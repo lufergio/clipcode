@@ -1,11 +1,58 @@
 import { NextResponse } from "next/server";
 import { redis } from "@/lib/redis";
 
+const MAX_TEXT_FILE_SIZE_BYTES = 256 * 1024;
+const ALLOWED_TEXT_FILE_EXTENSIONS = new Set([
+  "txt", "json", "sql", "md", "markdown", "csv", "tsv", "xml", "yaml", "yml",
+  "toml", "ini", "conf", "config", "log", "html", "htm", "css", "scss", "sass",
+  "less", "js", "jsx", "ts", "tsx", "mjs", "cjs", "py", "dart", "java", "kt",
+  "kts", "c", "h", "cpp", "hpp", "cc", "cs", "go", "rs", "rb", "php", "swift",
+  "sh", "bash", "zsh", "fish", "ps1", "bat", "cmd", "graphql", "gql", "prisma",
+  "vue", "svelte", "properties", "gradle",
+]);
+
+function isAllowedTextFileName(name: string): boolean {
+  const normalized = name.toLowerCase();
+  if (["dockerfile", "makefile", "procfile", ".gitignore", ".editorconfig", ".npmrc"].includes(normalized)) {
+    return true;
+  }
+  if (normalized === ".env" || normalized.startsWith(".env.")) return true;
+  const extension = normalized.includes(".") ? normalized.split(".").pop() ?? "" : "";
+  return ALLOWED_TEXT_FILE_EXTENSIONS.has(extension);
+}
+
 type StoredPayload =
-  | { links?: string[]; text?: string; createdAt?: number; reads?: number }
+  | {
+      links?: string[];
+      text?: string;
+      file?: SharedTextFile;
+      createdAt?: number;
+      reads?: number;
+    }
   | string
   | null;
 type RateLimitError = Error & { resetSeconds?: number };
+
+type SharedTextFile = {
+  name: string;
+  content: string;
+  size: number;
+  mimeType: "text/plain";
+};
+
+function normalizeTextFile(value: unknown): SharedTextFile | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as { name?: unknown; content?: unknown; size?: unknown };
+  const name = String(raw.name ?? "").trim();
+  if (typeof raw.content !== "string") return null;
+  const content = raw.content;
+  const size = new TextEncoder().encode(content).byteLength;
+
+  if (!isAllowedTextFileName(name) || size > MAX_TEXT_FILE_SIZE_BYTES) {
+    return null;
+  }
+  return { name, content, size, mimeType: "text/plain" };
+}
 
 /**
  * Rate limit PRO (serverless-safe) usando Redis.
@@ -85,7 +132,7 @@ export async function GET(
     }
 
     // ✅ Normalizar payload (puede venir como string JSON o como objeto)
-    let payload: { links?: string[]; text?: string } = {};
+    let payload: { links?: string[]; text?: string; file?: SharedTextFile } = {};
     if (typeof raw === "string") {
       try {
         payload = JSON.parse(raw);
@@ -102,8 +149,9 @@ export async function GET(
           .filter(Boolean)
       : [];
     const text = String(payload?.text ?? "").trim();
+    const file = normalizeTextFile(payload?.file);
 
-    if (!links.length && !text) {
+    if (!links.length && !text && !file) {
       return NextResponse.json(
         {
           error:
@@ -120,6 +168,7 @@ export async function GET(
       code,
       links,
       text: text || undefined,
+      file: file || undefined,
       consumed: true,
     });
   } catch (error: unknown) {

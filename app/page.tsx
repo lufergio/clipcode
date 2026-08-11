@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 import { QRCodeCanvas } from "qrcode.react";
 import clsx from "clsx";
 import { Space_Grotesk } from "next/font/google";
@@ -9,6 +9,13 @@ const spaceGrotesk = Space_Grotesk({
   subsets: ["latin"],
   variable: "--font-space-grotesk",
 });
+
+type SharedTextFile = {
+  name: string;
+  content: string;
+  size: number;
+  mimeType: "text/plain";
+};
 
 type SendState =
   | { status: "idle" }
@@ -24,6 +31,7 @@ type ReceiveState =
       code: string;
       links: string[];
       text?: string;
+      file?: SharedTextFile;
       sourceDeviceLabel?: string;
     }
   | { status: "error"; message: string };
@@ -46,6 +54,7 @@ type ReceivedHistoryItem = {
   code: string;
   links: string[];
   text?: string;
+  file?: SharedTextFile;
   sourceDeviceLabel?: string;
   receivedAt: number;
   repeatCount: number;
@@ -60,6 +69,18 @@ const TTL_OPTIONS = [
 ];
 
 const MAX_LINKS = 10;
+const MAX_TEXT_FILE_SIZE_BYTES = 256 * 1024;
+const ALLOWED_TEXT_FILE_EXTENSIONS = new Set([
+  "txt", "json", "sql", "md", "markdown", "csv", "tsv", "xml", "yaml", "yml",
+  "toml", "ini", "conf", "config", "log", "html", "htm", "css", "scss", "sass",
+  "less", "js", "jsx", "ts", "tsx", "mjs", "cjs", "py", "dart", "java", "kt",
+  "kts", "c", "h", "cpp", "hpp", "cc", "cs", "go", "rs", "rb", "php", "swift",
+  "sh", "bash", "zsh", "fish", "ps1", "bat", "cmd", "graphql", "gql", "prisma",
+  "vue", "svelte", "properties", "gradle",
+]);
+const TEXT_FILE_ACCEPT = Array.from(ALLOWED_TEXT_FILE_EXTENSIONS)
+  .map((extension) => `.${extension}`)
+  .join(",");
 const MIN_VISIBLE_LINK_INPUTS = 3;
 const DEVICE_ID_STORAGE_KEY = "clipcode:device-id";
 const DEVICE_LABEL_STORAGE_KEY = "clipcode:device-label";
@@ -245,6 +266,33 @@ function debugTrace(event: string, details?: Record<string, unknown>) {
   console.info("[clipcode][ui]", event, details ?? {});
 }
 
+function formatFileSize(size: number): string {
+  if (size < 1024) return `${size} B`;
+  return `${(size / 1024).toFixed(size < 10 * 1024 ? 1 : 0)} KB`;
+}
+
+function isAllowedTextFileName(name: string): boolean {
+  const normalized = name.toLowerCase();
+  if (["dockerfile", "makefile", "procfile", ".gitignore", ".editorconfig", ".npmrc"].includes(normalized)) {
+    return true;
+  }
+  if (normalized === ".env" || normalized.startsWith(".env.")) return true;
+  const extension = normalized.includes(".") ? normalized.split(".").pop() ?? "" : "";
+  return ALLOWED_TEXT_FILE_EXTENSIONS.has(extension);
+}
+
+function normalizeSharedTextFile(value: unknown): SharedTextFile | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const raw = value as { name?: unknown; content?: unknown; size?: unknown };
+  const name = String(raw.name ?? "").trim();
+  const content = typeof raw.content === "string" ? raw.content : "";
+  const size = Number(raw.size);
+  if (!isAllowedTextFileName(name) || !Number.isFinite(size) || size < 0) {
+    return undefined;
+  }
+  return { name, content, size, mimeType: "text/plain" };
+}
+
 function PasteIcon() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true" className="h-4 w-4">
@@ -300,12 +348,24 @@ function TextIcon() {
   );
 }
 
+function FileIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" className="h-4 w-4">
+      <path
+        d="M6 2h8l4 4v16H6V2Zm2 2v16h8V8h-4V4H8Zm6 .8V6h1.2L14 4.8ZM9 11h6v2H9v-2Zm0 4h6v2H9v-2Z"
+        fill="currentColor"
+      />
+    </svg>
+  );
+}
+
 export default function HomePage() {
   const [tab, setTab] = useState<"send" | "receive">("send");
 
   const [linkInputs, setLinkInputs] = useState<string[]>(["", "", ""]);
   const [showTextComposer, setShowTextComposer] = useState(false);
   const [text, setText] = useState("");
+  const [selectedFile, setSelectedFile] = useState<SharedTextFile | null>(null);
   const [ttlSeconds, setTtlSeconds] = useState(3600);
   const [sendState, setSendState] = useState<SendState>({ status: "idle" });
 
@@ -335,6 +395,7 @@ export default function HomePage() {
   const didAutoProcessRef = useRef(false);
 
   const sendTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const receiveInputRef = useRef<HTMLInputElement | null>(null);
 
   const [rememberPairing, setRememberPairing] = useState(true);
@@ -593,6 +654,7 @@ export default function HomePage() {
         code?: string;
         links?: string[];
         text?: string;
+        file?: unknown;
         error?: string;
       };
 
@@ -610,6 +672,7 @@ export default function HomePage() {
         ? data.links.map((value) => String(value ?? "").trim()).filter(Boolean)
         : [];
       const receivedText = String(data?.text ?? "").trim();
+      const receivedFile = normalizeSharedTextFile(data?.file);
 
       setReceiveTextOpen(true);
       setReceiveState({
@@ -617,12 +680,14 @@ export default function HomePage() {
         code: String(data?.code ?? code),
         links,
         text: receivedText || undefined,
+        file: receivedFile,
         sourceDeviceLabel: undefined,
       });
       appendReceivedHistory({
         code: String(data?.code ?? code),
         links,
         text: receivedText || undefined,
+        file: receivedFile,
       });
       setNearbyState({ status: "idle" });
     } catch {
@@ -656,16 +721,17 @@ export default function HomePage() {
 
   async function handleGenerate(payloadOverride?: { links: string[]; text?: string }) {
     const textValue = String((payloadOverride ? payloadOverride.text : text) ?? "").trim();
+    const fileValue = payloadOverride ? undefined : selectedFile ?? undefined;
     const manualLinks = payloadOverride ? payloadOverride.links : cleanedLinks;
     const autoExtracted = extractUrls(textValue);
     const combinedLinks = Array.from(
       new Set([...manualLinks.map((v) => v.trim()).filter(Boolean), ...autoExtracted])
     );
 
-    if (!combinedLinks.length && !textValue) {
+    if (!combinedLinks.length && !textValue && !fileValue) {
       setSendState({
         status: "error",
-        message: "Escribe o pega texto, código o enlaces para compartir.",
+        message: "Escribe texto, pega enlaces o selecciona un archivo de texto.",
       });
       return;
     }
@@ -684,6 +750,7 @@ export default function HomePage() {
       debugTrace("share:request", {
         linksCount: combinedLinks.length,
         hasText: Boolean(textValue),
+        hasFile: Boolean(fileValue),
         ttlSeconds,
         senderDeviceId: deviceId || null,
       });
@@ -693,6 +760,7 @@ export default function HomePage() {
         body: JSON.stringify({
           links: combinedLinks,
           text: textValue || undefined,
+          file: fileValue,
           ttlSeconds,
           senderDeviceId: deviceId || undefined,
           senderDeviceLabel: deviceLabel || undefined,
@@ -954,10 +1022,69 @@ export default function HomePage() {
     setText("");
   }
 
+  /** Lee un archivo de desarrollo como texto; nunca se sube como binario. */
+  async function handleTextFileSelected(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    if (!isAllowedTextFileName(file.name)) {
+      event.target.value = "";
+      setSendState({ status: "error", message: "Ese formato no es un archivo de texto compatible." });
+      return;
+    }
+    if (file.size > MAX_TEXT_FILE_SIZE_BYTES) {
+      event.target.value = "";
+      setSendState({
+        status: "error",
+        message: "El archivo de texto no puede superar 256 KB.",
+      });
+      return;
+    }
+
+    try {
+      const content = await file.text();
+      const contentSize = new TextEncoder().encode(content).byteLength;
+      if (contentSize > MAX_TEXT_FILE_SIZE_BYTES) {
+        throw new Error("FILE_TOO_LARGE");
+      }
+      setSelectedFile({
+        name: file.name,
+        content,
+        size: contentSize,
+        mimeType: "text/plain",
+      });
+      setSendState({ status: "idle" });
+      showToast("Archivo de texto listo para enviar");
+    } catch {
+      event.target.value = "";
+      setSendState({ status: "error", message: "No se pudo leer el archivo de texto." });
+    }
+  }
+
+  function clearSelectedFile() {
+    setSelectedFile(null);
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  }
+
+  /** Reconstruye el contenido recibido como un archivo descargable. */
+  function downloadTextFile(file: SharedTextFile) {
+    const blob = new Blob([file.content], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = file.name;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+    showToast("Descarga iniciada");
+  }
+
   function appendReceivedHistory(item: {
     code: string;
     links: string[];
     text?: string;
+    file?: SharedTextFile;
     sourceDeviceLabel?: string;
   }) {
     const normalizedCode = String(item.code ?? "").trim().toUpperCase() || "PAIR";
@@ -965,7 +1092,7 @@ export default function HomePage() {
       ? item.links.map((value) => String(value ?? "").trim()).filter(Boolean)
       : [];
     const normalizedText = String(item.text ?? "").trim();
-    if (!normalizedLinks.length && !normalizedText) return;
+    if (!normalizedLinks.length && !normalizedText && !item.file) return;
 
     const entry: ReceivedHistoryItem = {
       id:
@@ -975,6 +1102,7 @@ export default function HomePage() {
       code: normalizedCode,
       links: normalizedLinks,
       text: normalizedText || undefined,
+      file: item.file,
       sourceDeviceLabel: normalizeDeviceLabel(item.sourceDeviceLabel) || undefined,
       receivedAt: Date.now(),
       repeatCount: 1,
@@ -983,6 +1111,8 @@ export default function HomePage() {
     const signature = JSON.stringify({
       links: normalizedLinks,
       text: normalizedText || "",
+      fileName: item.file?.name || "",
+      fileSize: item.file?.size || 0,
       sourceDeviceLabel: entry.sourceDeviceLabel || "",
     });
 
@@ -991,6 +1121,8 @@ export default function HomePage() {
         const historySignature = JSON.stringify({
           links: historyItem.links,
           text: historyItem.text || "",
+          fileName: historyItem.file?.name || "",
+          fileSize: historyItem.file?.size || 0,
           sourceDeviceLabel: historyItem.sourceDeviceLabel || "",
         });
         return historySignature === signature;
@@ -1108,6 +1240,7 @@ export default function HomePage() {
       code?: string;
       links: string[];
       text?: string;
+      file?: SharedTextFile;
       senderDeviceLabel?: string;
     };
   }> {
@@ -1125,6 +1258,7 @@ export default function HomePage() {
         code?: string;
         links?: string[];
         text?: string;
+        file?: unknown;
         senderDeviceLabel?: string;
       };
       error?: string;
@@ -1149,6 +1283,7 @@ export default function HomePage() {
       ? data.item.links.map((value) => String(value ?? "").trim()).filter(Boolean)
       : [];
     const textValue = String(data.item.text ?? "").trim();
+    const fileValue = normalizeSharedTextFile(data.item.file);
     const messageIdValue = String(data.item.messageId ?? "").trim();
     const codeValue = String(data.item.code ?? "").trim().toUpperCase();
     const senderDeviceLabel = normalizeDeviceLabel(data.item.senderDeviceLabel);
@@ -1160,6 +1295,7 @@ export default function HomePage() {
         code: codeValue || undefined,
         links,
         text: textValue || undefined,
+        file: fileValue,
         senderDeviceLabel: senderDeviceLabel || undefined,
       },
     };
@@ -1234,12 +1370,14 @@ export default function HomePage() {
             code: result.item.code ?? "PAIR",
             links: result.item.links,
             text: result.item.text,
+            file: result.item.file,
             sourceDeviceLabel: result.item.senderDeviceLabel,
           });
           appendReceivedHistory({
             code: result.item.code ?? "PAIR",
             links: result.item.links,
             text: result.item.text,
+            file: result.item.file,
             sourceDeviceLabel: result.item.senderDeviceLabel,
           });
           setNearbyState({ status: "idle" });
@@ -1248,6 +1386,7 @@ export default function HomePage() {
             code: result.item.code ?? null,
             linksCount: result.item.links.length,
             hasText: Boolean(result.item.text),
+            hasFile: Boolean(result.item.file),
           });
           if (result.item.messageId) {
             try {
@@ -1693,11 +1832,27 @@ export default function HomePage() {
                     <PasteIcon />
                     <span>Pegar</span>
                   </button>
-                  {text && (
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept={TEXT_FILE_ACCEPT}
+                    className="hidden"
+                    onChange={(event) => void handleTextFileSelected(event)}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => fileInputRef.current?.click()}
+                    className="inline-flex items-center gap-1.5 rounded-xl border border-emerald-400/30 bg-emerald-400/10 px-3 py-1.5 text-xs font-semibold text-emerald-200 transition hover:bg-emerald-400/20"
+                  >
+                    <FileIcon />
+                    <span>Subir archivo</span>
+                  </button>
+                  {(text || selectedFile) && (
                     <button
                       type="button"
                       onClick={() => {
                         setText("");
+                        clearSelectedFile();
                         setSendState({ status: "idle" });
                       }}
                       className="inline-flex items-center gap-1.5 rounded-xl border border-rose-400/30 bg-rose-400/10 px-3 py-1.5 text-xs font-semibold text-rose-200 transition hover:bg-rose-400/20"
@@ -1723,6 +1878,32 @@ export default function HomePage() {
                   </button>
                 </div>
               </div>
+
+              {selectedFile && (
+                <div className="mx-4 mt-4 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-emerald-400/30 bg-emerald-400/10 px-4 py-3 sm:mx-6">
+                  <div className="flex min-w-0 items-center gap-3">
+                    <span className="rounded-xl bg-emerald-400/15 p-2 text-emerald-200">
+                      <FileIcon />
+                    </span>
+                    <div className="min-w-0">
+                      <div className="truncate text-sm font-semibold text-slate-100">
+                        {selectedFile.name}
+                      </div>
+                      <div className="text-xs text-slate-400">
+                        Archivo de texto · {formatFileSize(selectedFile.size)}
+                      </div>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={clearSelectedFile}
+                    className="inline-flex items-center gap-1.5 rounded-xl border border-rose-400/30 bg-rose-400/10 px-3 py-1.5 text-xs font-semibold text-rose-200 transition hover:bg-rose-400/20"
+                  >
+                    <TrashIcon />
+                    <span>Quitar</span>
+                  </button>
+                </div>
+              )}
 
               {/* Large Central Textarea */}
               <div className="p-4 sm:p-6">
@@ -1757,6 +1938,7 @@ export default function HomePage() {
                   <button
                     onClick={() => {
                       setText("");
+                      clearSelectedFile();
                       setSendState({ status: "idle" });
                     }}
                     className="text-xs font-medium text-slate-400 hover:text-slate-200 transition"
@@ -1844,6 +2026,32 @@ export default function HomePage() {
                         </div>
                       </div>
                     ))}
+                  </div>
+                )}
+
+                {receiveState.file && (
+                  <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-emerald-400/30 bg-emerald-400/10 p-3">
+                    <div className="flex min-w-0 items-center gap-3">
+                      <span className="rounded-xl bg-emerald-400/15 p-2 text-emerald-200">
+                        <FileIcon />
+                      </span>
+                      <div className="min-w-0">
+                        <div className="truncate text-sm font-semibold text-slate-100">
+                          {receiveState.file.name}
+                        </div>
+                        <div className="text-xs text-slate-400">
+                          Archivo de texto · {formatFileSize(receiveState.file.size)}
+                        </div>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => downloadTextFile(receiveState.file!)}
+                      className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-emerald-300 to-teal-300 px-4 py-2 text-xs font-semibold text-slate-950 transition hover:brightness-110"
+                    >
+                      <FileIcon />
+                      <span>Descargar</span>
+                    </button>
                   </div>
                 )}
 
